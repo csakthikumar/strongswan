@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2006-2007 Martin Willi
  * Copyright (C) 2006 Tobias Brunner, Daniel Roethlisberger
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -18,7 +18,6 @@
 
 #include <string.h>
 
-#include <hydra.h>
 #include <daemon.h>
 #include <config/peer_cfg.h>
 #include <crypto/hashers/hasher.h>
@@ -86,7 +85,7 @@ static bool force_encap(ike_cfg_t *ike_cfg)
 {
 	if (!ike_cfg->force_encap(ike_cfg))
 	{
-		return hydra->kernel_interface->get_features(hydra->kernel_interface) &
+		return charon->kernel->get_features(charon->kernel) &
 					KERNEL_REQUIRE_UDP_ENCAPSULATION;
 	}
 	return TRUE;
@@ -100,8 +99,8 @@ static chunk_t generate_natd_hash(private_ike_natd_t *this,
 {
 	chunk_t natd_chunk, spi_i_chunk, spi_r_chunk, addr_chunk, port_chunk;
 	chunk_t natd_hash;
-	u_int64_t spi_i, spi_r;
-	u_int16_t port;
+	uint64_t spi_i, spi_r;
+	uint16_t port;
 
 	/* prepare all required chunks */
 	spi_i = ike_sa_id->get_initiator_spi(ike_sa_id);
@@ -143,7 +142,7 @@ static notify_payload_t *build_natd_payload(private_ike_natd_t *this,
 	config = this->ike_sa->get_ike_cfg(this->ike_sa);
 	if (force_encap(config) && type == NAT_DETECTION_SOURCE_IP)
 	{
-		u_int32_t addr;
+		uint32_t addr;
 
 		/* chunk_hash() is randomly keyed so this produces a random IPv4 address
 		 * that changes with every restart but otherwise stays the same */
@@ -327,7 +326,7 @@ METHOD(task_t, build_i, status_t,
 	}
 	else
 	{
-		host = hydra->kernel_interface->get_source_addr(hydra->kernel_interface,
+		host = charon->kernel->get_source_addr(charon->kernel,
 							this->ike_sa->get_other_host(this->ike_sa), NULL);
 		if (host)
 		{	/* 2. */
@@ -341,8 +340,8 @@ METHOD(task_t, build_i, status_t,
 		}
 		else
 		{	/* 3. */
-			enumerator = hydra->kernel_interface->create_address_enumerator(
-									hydra->kernel_interface, ADDR_TYPE_REGULAR);
+			enumerator = charon->kernel->create_address_enumerator(
+											charon->kernel, ADDR_TYPE_REGULAR);
 			while (enumerator->enumerate(enumerator, (void**)&host))
 			{
 				/* apply port 500 to host, but work on a copy */

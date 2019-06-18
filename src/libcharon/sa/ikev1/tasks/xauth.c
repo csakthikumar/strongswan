@@ -16,7 +16,6 @@
 #include "xauth.h"
 
 #include <daemon.h>
-#include <hydra.h>
 #include <encoding/payloads/cp_payload.h>
 #include <processing/jobs/adopt_children_job.h>
 #include <sa/ikev1/tasks/mode_config.h>
@@ -69,7 +68,7 @@ struct private_xauth_t {
 	/**
 	 * received identifier
 	 */
-	u_int16_t identifier;
+	uint16_t identifier;
 
 	/**
 	 * status of Xauth exchange
@@ -227,7 +226,7 @@ static bool select_compliant_config(private_xauth_t *this)
 	{	/* current config is fine */
 		return TRUE;
 	}
-	DBG1(DBG_CFG, "selected peer config '%s' inacceptable",
+	DBG1(DBG_CFG, "selected peer config '%s' unacceptable",
 		 old->get_name(old));
 	aggressive = old->use_aggressive(old);
 

@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013 Tobias Brunner
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -15,30 +15,30 @@
 
 package org.strongswan.android.ui;
 
-import java.util.ArrayList;
+import android.os.Bundle;
+import android.support.v7.app.AppCompatActivity;
+import android.view.MenuItem;
 
 import org.strongswan.android.R;
 import org.strongswan.android.logic.imc.RemediationInstruction;
 import org.strongswan.android.ui.RemediationInstructionsFragment.OnRemediationInstructionSelectedListener;
 
-import android.app.Activity;
-import android.os.Bundle;
-import android.view.MenuItem;
+import java.util.ArrayList;
 
-public class RemediationInstructionsActivity extends Activity implements OnRemediationInstructionSelectedListener
+public class RemediationInstructionsActivity extends AppCompatActivity implements OnRemediationInstructionSelectedListener
 {
 	@Override
 	protected void onCreate(Bundle savedInstanceState)
 	{
 		super.onCreate(savedInstanceState);
 		setContentView(R.layout.remediation_instructions);
-		getActionBar().setDisplayHomeAsUpEnabled(true);
+		getSupportActionBar().setDisplayHomeAsUpEnabled(true);
 
 		if (savedInstanceState != null)
 		{	/* only update if we're not restoring */
 			return;
 		}
-		RemediationInstructionsFragment frag = (RemediationInstructionsFragment)getFragmentManager().findFragmentById(R.id.remediation_instructions_fragment);
+		RemediationInstructionsFragment frag = (RemediationInstructionsFragment)getSupportFragmentManager().findFragmentById(R.id.remediation_instructions_fragment);
 		if (frag != null)
 		{	/* two-pane layout, update fragment */
 			Bundle extras = getIntent().getExtras();
@@ -49,7 +49,7 @@ public class RemediationInstructionsActivity extends Activity implements OnRemed
 		{	/* one-pane layout, create fragment */
 			frag = new RemediationInstructionsFragment();
 			frag.setArguments(getIntent().getExtras());
-			getFragmentManager().beginTransaction().add(R.id.fragment_container, frag).commit();
+			getSupportFragmentManager().beginTransaction().add(R.id.fragment_container, frag).commit();
 		}
 	}
 
@@ -60,11 +60,11 @@ public class RemediationInstructionsActivity extends Activity implements OnRemed
 		{
 			case android.R.id.home:
 				/* one-pane layout, pop possible fragment from stack, finish otherwise */
-				if (!getFragmentManager().popBackStackImmediate())
+				if (!getSupportFragmentManager().popBackStackImmediate())
 				{
 					finish();
 				}
-				getActionBar().setTitle(getTitle());
+				getSupportActionBar().setTitle(getTitle());
 				return true;
 			default:
 				return super.onOptionsItemSelected(item);
@@ -74,7 +74,7 @@ public class RemediationInstructionsActivity extends Activity implements OnRemed
 	@Override
 	public void onRemediationInstructionSelected(RemediationInstruction instruction)
 	{
-		RemediationInstructionFragment frag = (RemediationInstructionFragment)getFragmentManager().findFragmentById(R.id.remediation_instruction_fragment);
+		RemediationInstructionFragment frag = (RemediationInstructionFragment)getSupportFragmentManager().findFragmentById(R.id.remediation_instruction_fragment);
 
 		if (frag != null)
 		{	/* two-pane layout, update directly */
@@ -87,8 +87,8 @@ public class RemediationInstructionsActivity extends Activity implements OnRemed
 			args.putParcelable(RemediationInstructionFragment.ARG_REMEDIATION_INSTRUCTION, instruction);
 			frag.setArguments(args);
 
-			getFragmentManager().beginTransaction().replace(R.id.fragment_container, frag).addToBackStack(null).commit();
-			getActionBar().setTitle(instruction.getTitle());
+			getSupportFragmentManager().beginTransaction().replace(R.id.fragment_container, frag).addToBackStack(null).commit();
+			getSupportActionBar().setTitle(instruction.getTitle());
 		}
 	}
 }

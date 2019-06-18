@@ -1,15 +1,14 @@
 apply plugin: 'com.android.application'
 
 android {
-    compileSdkVersion 21
-    buildToolsVersion "22.0.1"
+    compileSdkVersion 26
 
     defaultConfig {
         applicationId "org.strongswan.android"
         minSdkVersion 15
-        targetSdkVersion 22
-        versionCode 28
-        versionName "1.5.0"
+        targetSdkVersion 26
+        versionCode 64
+        versionName "2.1.1"
     }
 
     sourceSets.main {
@@ -29,6 +28,7 @@ android {
 
     tasks.withType(JavaCompile) {
         compileTask -> compileTask.dependsOn buildNative
+        options.compilerArgs << "-Xlint:unchecked" << "-Xlint:deprecation"
     }
 
     clean.dependsOn 'cleanNative'
@@ -39,8 +39,16 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.txt'
         }
     }
+    compileOptions {
+        targetCompatibility 1.8
+        sourceCompatibility 1.8
+    }
 }
 
 dependencies {
-    testCompile 'junit:junit:4.12'
+    implementation 'com.android.support:appcompat-v7:26.0.2'
+    implementation 'com.android.support:design:26.0.2'
+    implementation 'com.android.support:preference-v7:26.0.2'
+    implementation 'com.android.support:support-v4:26.0.2'
+    testImplementation 'junit:junit:4.12'
 }

@@ -1,6 +1,5 @@
 AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/libstrongswan \
-	-I$(top_srcdir)/src/libhydra \
 	-I$(top_srcdir)/src/libcharon
 
 AM_CFLAGS = \
@@ -17,3 +16,4 @@ libstrongswan_android_log_la_SOURCES = \
 	android_log_logger.c android_log_logger.h
 
 libstrongswan_android_log_la_LDFLAGS = -module -avoid-version
+libstrongswan_android_log_la_LIBADD  = -llog

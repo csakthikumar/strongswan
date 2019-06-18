@@ -2,6 +2,9 @@
  * Copyright (C) 2014 Martin Willi
  * Copyright (C) 2014 revosec AG
  *
+ * Copyright (C) 2016 Andreas Steffen
+ * HSR Hochschule fuer Technik Rapperswil
+
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation; either version 2 of the License, or (at your
@@ -109,8 +112,9 @@ CALLBACK(child_sas, int,
 	if (ret == 0)
 	{
 		printf("  %s: #%s, reqid %s, %s, %s%s, %s:",
-			name, child->get(child, "uniqueid"), child->get(child, "reqid"),
-			child->get(child, "state"), child->get(child, "mode"),
+			child->get(child, "name"), child->get(child, "uniqueid"),
+			child->get(child, "reqid"), child->get(child, "state"),
+			child->get(child, "mode"),
 			child->get(child, "encap") ? "-in-UDP" : "",
 			child->get(child, "protocol"));
 
@@ -162,6 +166,27 @@ CALLBACK(child_sas, int,
 		printf("    in  %s%s%s", child->get(child, "spi-in"),
 			child->get(child, "cpi-in") ? "/" : "",
 			child->get(child, "cpi-in") ?: "");
+		if (child->get(child, "mark-in") || child->get(child, "if-id-in"))
+		{
+			printf(" (");
+			if (child->get(child, "mark-in"))
+			{
+				printf("0x%s", child->get(child, "mark-in"));
+				if (child->get(child, "mark-mask-in"))
+				{
+					printf("/0x%s", child->get(child, "mark-mask-in"));
+				}
+			}
+			else
+			{
+				printf("-");
+			}
+			if (child->get(child, "if-id-in"))
+			{
+				printf("|0x%s", child->get(child, "if-id-in"));
+			}
+			printf(")");
+		}
 		printf(", %6s bytes, %5s packets",
 			child->get(child, "bytes-in"), child->get(child, "packets-in"));
 		if (child->get(child, "use-in"))
@@ -173,6 +198,27 @@ CALLBACK(child_sas, int,
 		printf("    out %s%s%s", child->get(child, "spi-out"),
 			child->get(child, "cpi-out") ? "/" : "",
 			child->get(child, "cpi-out") ?: "");
+		if (child->get(child, "mark-out") || child->get(child, "if-id-out"))
+		{
+			printf(" (");
+			if (child->get(child, "mark-out"))
+			{
+				printf("0x%s", child->get(child, "mark-out"));
+				if (child->get(child, "mark-mask-out"))
+				{
+					printf("/0x%s", child->get(child, "mark-mask-out"));
+				}
+			}
+			else
+			{
+				printf("-");
+			}
+			if (child->get(child, "if-id-out"))
+			{
+				printf("|0x%s", child->get(child, "if-id-out"));
+			}
+			printf(")");
+		}
 		printf(", %6s bytes, %5s packets",
 			child->get(child, "bytes-out"), child->get(child, "packets-out"));
 		if (child->get(child, "use-out"))
@@ -193,21 +239,26 @@ CALLBACK(ike_sa, int,
 {
 	if (streq(name, "child-sas"))
 	{
-		printf("%s: #%s, %s, IKEv%s, %s:%s\n",
+		bool is_initiator = streq(ike->get(ike, "initiator"), "yes");
+
+		printf("%s: #%s, %s, IKEv%s, %s_i%s %s_r%s\n",
 			ike->get(ike, "name"), ike->get(ike, "uniqueid"),
 			ike->get(ike, "state"), ike->get(ike, "version"),
-			ike->get(ike, "initiator-spi"), ike->get(ike, "responder-spi"));
+			ike->get(ike, "initiator-spi"), is_initiator ? "*" : "",
+			ike->get(ike, "responder-spi"), is_initiator ? "" : "*");
 
-		printf("  local  '%s' @ %s",
-			ike->get(ike, "local-id"), ike->get(ike, "local-host"));
+		printf("  local  '%s' @ %s[%s]",
+			ike->get(ike, "local-id"), ike->get(ike, "local-host"),
+			ike->get(ike, "local-port"));
 		if (ike->get(ike, "local-vips"))
 		{
 			printf(" [%s]", ike->get(ike, "local-vips"));
 		}
 		printf("\n");
 
-		printf("  remote '%s' @ %s",
-			ike->get(ike, "remote-id"), ike->get(ike, "remote-host"));
+		printf("  remote '%s' @ %s[%s]",
+			ike->get(ike, "remote-id"), ike->get(ike, "remote-host"),
+			ike->get(ike, "remote-port"));
 		if (ike->get(ike, "remote-eap-id"))
 		{
 			printf(" EAP: '%s'", ike->get(ike, "remote-eap-id"));
@@ -239,6 +290,10 @@ CALLBACK(ike_sa, int,
 			}
 			printf("/%s", ike->get(ike, "prf-alg"));
 			printf("/%s", ike->get(ike, "dh-group"));
+			if (streq(ike->get(ike, "ppk"), "yes"))
+			{
+				printf("/PPK");
+			}
 			printf("\n");
 		}
 

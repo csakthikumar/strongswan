@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2010 Tobias Brunner
  * Copyright (C) 2009 Martin Willi
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -54,6 +54,8 @@ struct attribute_entry_t {
 	configuration_attribute_type_t type;
 	/** attribute value */
 	chunk_t value;
+	/** associated IKE version */
+	ike_version_t ike;
 };
 
 /**
@@ -66,26 +68,57 @@ static void attribute_destroy(attribute_entry_t *this)
 }
 
 /**
- * convert enumerator value from attribute_entry
+ * Data for attribute enumerator
  */
-static bool attr_enum_filter(void *null, attribute_entry_t **in,
-			configuration_attribute_type_t *type, void* none, chunk_t *value)
+typedef struct {
+	rwlock_t *lock;
+	ike_version_t ike;
+} enumerator_data_t;
+
+CALLBACK(attr_enum_filter, bool,
+	enumerator_data_t *data, enumerator_t *orig, va_list args)
 {
-	*type = (*in)->type;
-	*value = (*in)->value;
-	return TRUE;
+	configuration_attribute_type_t *type;
+	attribute_entry_t *entry;
+	chunk_t *value;
+
+	VA_ARGS_VGET(args, type, value);
+
+	while (orig->enumerate(orig, &entry))
+	{
+		if (entry->ike == IKE_ANY || entry->ike == data->ike)
+		{
+			*type = entry->type;
+			*value = entry->value;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+CALLBACK(attr_enum_destroy, void,
+	enumerator_data_t *data)
+{
+	data->lock->unlock(data->lock);
+	free(data);
 }
 
 METHOD(attribute_provider_t, create_attribute_enumerator, enumerator_t*,
 	private_attr_provider_t *this, linked_list_t *pools,
 	ike_sa_t *ike_sa, linked_list_t *vips)
 {
+	enumerator_data_t *data;
+
 	if (vips->get_count(vips))
 	{
+		INIT(data,
+			.lock = this->lock,
+			.ike = ike_sa->get_version(ike_sa),
+		);
 		this->lock->read_lock(this->lock);
 		return enumerator_create_filter(
 				this->attributes->create_enumerator(this->attributes),
-				(void*)attr_enum_filter, this->lock, (void*)this->lock->unlock);
+				attr_enum_filter, data, attr_enum_destroy);
 	}
 	return enumerator_create_empty();
 }
@@ -116,8 +149,6 @@ static void add_legacy_entry(private_attr_provider_t *this, char *key, int nr,
 		host = host_create_from_string(str, 0);
 		if (host)
 		{
-			entry = malloc_thing(attribute_entry_t);
-
 			if (host->get_family(host) == AF_INET6)
 			{
 				switch (type)
@@ -132,8 +163,11 @@ static void add_legacy_entry(private_attr_provider_t *this, char *key, int nr,
 						break;
 				}
 			}
-			entry->type = type;
-			entry->value = chunk_clone(host->get_address(host));
+			INIT(entry,
+				.type = type,
+				.value = chunk_clone(host->get_address(host)),
+				.ike = IKE_ANY,
+			);
 			host->destroy(host);
 			DBG2(DBG_CFG, "loaded legacy entry attribute %N: %#B",
 				 configuration_attribute_type_names, entry->type, &entry->value);
@@ -149,18 +183,20 @@ typedef struct {
 	char *name;
 	configuration_attribute_type_t v4;
 	configuration_attribute_type_t v6;
+	ike_version_t ike;
 } attribute_type_key_t;
 
 static attribute_type_key_t keys[] = {
-	{"address",			INTERNAL_IP4_ADDRESS,	INTERNAL_IP6_ADDRESS},
-	{"dns",				INTERNAL_IP4_DNS,		INTERNAL_IP6_DNS},
-	{"nbns",			INTERNAL_IP4_NBNS,		INTERNAL_IP6_NBNS},
-	{"dhcp",			INTERNAL_IP4_DHCP,		INTERNAL_IP6_DHCP},
-	{"netmask",			INTERNAL_IP4_NETMASK,	INTERNAL_IP6_NETMASK},
-	{"server",			INTERNAL_IP4_SERVER,	INTERNAL_IP6_SERVER},
-	{"subnet",			INTERNAL_IP4_SUBNET,	INTERNAL_IP6_SUBNET},
-	{"split-include",	UNITY_SPLIT_INCLUDE,	UNITY_SPLIT_INCLUDE},
-	{"split-exclude",	UNITY_LOCAL_LAN,		UNITY_LOCAL_LAN},
+	{"address",			INTERNAL_IP4_ADDRESS,	INTERNAL_IP6_ADDRESS,	IKE_ANY},
+	{"dns",				INTERNAL_IP4_DNS,		INTERNAL_IP6_DNS,		IKE_ANY},
+	{"nbns",			INTERNAL_IP4_NBNS,		INTERNAL_IP6_NBNS,		IKE_ANY},
+	{"dhcp",			INTERNAL_IP4_DHCP,		INTERNAL_IP6_DHCP,		IKE_ANY},
+	{"netmask",			INTERNAL_IP4_NETMASK,	INTERNAL_IP6_NETMASK,	IKE_ANY},
+	{"server",			INTERNAL_IP4_SERVER,	INTERNAL_IP6_SERVER,	IKE_ANY},
+	{"subnet",			INTERNAL_IP4_SUBNET,	INTERNAL_IP6_SUBNET,	IKE_ANY},
+	{"p-cscf",			P_CSCF_IP4_ADDRESS,		P_CSCF_IP6_ADDRESS,		IKEV2},
+	{"split-include",	UNITY_SPLIT_INCLUDE,	UNITY_SPLIT_INCLUDE,	IKEV1},
+	{"split-exclude",	UNITY_LOCAL_LAN,		UNITY_LOCAL_LAN,		IKEV1},
 };
 
 /**
@@ -242,10 +278,10 @@ static void load_entries(private_attr_provider_t *this)
 				{
 					if (family == AF_INET)
 					{	/* IPv4 attributes contain a subnet mask */
-						u_int32_t netmask = 0;
+						uint32_t netmask = 0;
 
 						if (mask)
-						{	/* shifting u_int32_t by 32 or more is undefined */
+						{	/* shifting uint32_t by 32 or more is undefined */
 							mask = 32 - mask;
 							netmask = htonl((0xFFFFFFFF >> mask) << mask);
 						}
@@ -275,6 +311,7 @@ static void load_entries(private_attr_provider_t *this)
 			INIT(entry,
 				.type = type,
 				.value = data,
+				.ike = mapped ? mapped->ike : IKE_ANY,
 			);
 			DBG2(DBG_CFG, "loaded attribute %N: %#B",
 				 configuration_attribute_type_names, entry->type, &entry->value);

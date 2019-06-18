@@ -14,7 +14,6 @@
  */
 
 #include <test_runner.h>
-#include <hydra.h>
 #include <daemon.h>
 
 /* declare test suite constructors */
@@ -33,14 +32,30 @@ static test_configuration_t tests[] = {
 	{ .suite = NULL, }
 };
 
+static void initialize_logging()
+{
+	int level = LEVEL_SILENT;
+	char *verbosity;
+
+	verbosity = getenv("TESTS_VERBOSITY");
+	if (verbosity)
+	{
+		level = atoi(verbosity);
+	}
+	lib->settings->set_int(lib->settings, "%s.filelog.stderr.default",
+			lib->settings->get_int(lib->settings, "%s.filelog.stderr.default",
+								   level, lib->ns), lib->ns);
+	charon->load_loggers(charon);
+}
+
 static bool test_runner_init(bool init)
 {
 	if (init)
 	{
 		char *plugins, *plugindir;
 
-		libhydra_init();
 		libcharon_init();
+		initialize_logging();
 
 		plugins = getenv("TESTS_PLUGINS") ?:
 					lib->settings->get_str(lib->settings,
@@ -55,11 +70,7 @@ static bool test_runner_init(bool init)
 	}
 	else
 	{
-		lib->processor->set_threads(lib->processor, 0);
-		lib->processor->cancel(lib->processor);
-		lib->plugins->unload(lib->plugins);
 		libcharon_deinit();
-		libhydra_deinit();
 	}
 	return TRUE;
 }

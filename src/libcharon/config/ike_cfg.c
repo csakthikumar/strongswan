@@ -1,8 +1,8 @@
 /*
- * Copyright (C) 2012-2015 Tobias Brunner
+ * Copyright (C) 2012-2019 Tobias Brunner
  * Copyright (C) 2005-2007 Martin Willi
  * Copyright (C) 2005 Jan Hutter
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -83,12 +83,12 @@ struct private_ike_cfg_t {
 	/**
 	 * our source port
 	 */
-	u_int16_t my_port;
+	uint16_t my_port;
 
 	/**
 	 * destination port
 	 */
-	u_int16_t other_port;
+	uint16_t other_port;
 
 	/**
 	 * should we send a certificate request?
@@ -101,14 +101,19 @@ struct private_ike_cfg_t {
 	bool force_encap;
 
 	/**
-	 * use IKEv1 fragmentation
+	 * use IKE fragmentation
 	 */
 	fragmentation_t fragmentation;
 
 	/**
+	 * childless IKE_SAs
+	 */
+	childless_t childless;
+
+	/**
 	 * DSCP value to use on sent IKE packets
 	 */
-	u_int8_t dscp;
+	uint8_t dscp;
 
 	/**
 	 * List of proposals to use
@@ -140,10 +145,16 @@ METHOD(ike_cfg_t, fragmentation, fragmentation_t,
 	return this->fragmentation;
 }
 
+METHOD(ike_cfg_t, childless, childless_t,
+	private_ike_cfg_t *this)
+{
+	return this->childless;
+}
+
 /**
  * Common function for resolve_me/other
  */
-static host_t* resolve(linked_list_t *hosts, int family, u_int16_t port)
+static host_t* resolve(linked_list_t *hosts, int family, uint16_t port)
 {
 	enumerator_t *enumerator;
 	host_t *host = NULL;
@@ -192,7 +203,7 @@ static u_int match(linked_list_t *hosts, linked_list_t *ranges, host_t *cand)
 	traffic_selector_t *ts;
 	char *str;
 	host_t *host;
-	u_int8_t mask;
+	uint8_t mask;
 	u_int quality = 0;
 
 	/* try single hosts first */
@@ -224,12 +235,12 @@ static u_int match(linked_list_t *hosts, linked_list_t *ranges, host_t *cand)
 			if (ts->to_subnet(ts, &host, &mask))
 			{
 				quality = max(quality, mask + 1);
-				host->destroy(host);
 			}
 			else
 			{
 				quality = max(quality, 1);
 			}
+			host->destroy(host);
 		}
 	}
 	enumerator->destroy(enumerator);
@@ -261,19 +272,19 @@ METHOD(ike_cfg_t, get_other_addr, char*,
 	return this->other;
 }
 
-METHOD(ike_cfg_t, get_my_port, u_int16_t,
+METHOD(ike_cfg_t, get_my_port, uint16_t,
 	private_ike_cfg_t *this)
 {
 	return this->my_port;
 }
 
-METHOD(ike_cfg_t, get_other_port, u_int16_t,
+METHOD(ike_cfg_t, get_other_port, uint16_t,
 	private_ike_cfg_t *this)
 {
 	return this->other_port;
 }
 
-METHOD(ike_cfg_t, get_dscp, u_int8_t,
+METHOD(ike_cfg_t, get_dscp, uint8_t,
 	private_ike_cfg_t *this)
 {
 	return this->dscp;
@@ -309,43 +320,77 @@ METHOD(ike_cfg_t, get_proposals, linked_list_t*,
 	return proposals;
 }
 
-METHOD(ike_cfg_t, select_proposal, proposal_t*,
-	private_ike_cfg_t *this, linked_list_t *proposals, bool private)
+METHOD(ike_cfg_t, has_proposal, bool,
+	private_ike_cfg_t *this, proposal_t *match, bool private)
 {
-	enumerator_t *stored_enum, *supplied_enum;
-	proposal_t *stored, *supplied, *selected;
+	enumerator_t *enumerator;
+	proposal_t *proposal;
 
-	stored_enum = this->proposals->create_enumerator(this->proposals);
-	supplied_enum = proposals->create_enumerator(proposals);
-
-
-	/* compare all stored proposals with all supplied. Stored ones are preferred.*/
-	while (stored_enum->enumerate(stored_enum, (void**)&stored))
+	enumerator = this->proposals->create_enumerator(this->proposals);
+	while (enumerator->enumerate(enumerator, &proposal))
 	{
-		proposals->reset_enumerator(proposals, supplied_enum);
-
-		while (supplied_enum->enumerate(supplied_enum, (void**)&supplied))
+		if (proposal->matches(proposal, match, private))
 		{
-			selected = stored->select(stored, supplied, private);
-			if (selected)
-			{
-				/* they match, return */
-				stored_enum->destroy(stored_enum);
-				supplied_enum->destroy(supplied_enum);
-				DBG2(DBG_CFG, "received proposals: %#P", proposals);
-				DBG2(DBG_CFG, "configured proposals: %#P", this->proposals);
-				DBG2(DBG_CFG, "selected proposal: %P", selected);
-				return selected;
-			}
+			enumerator->destroy(enumerator);
+			return TRUE;
 		}
 	}
-	/* no proposal match :-(, will result in a NO_PROPOSAL_CHOSEN... */
-	stored_enum->destroy(stored_enum);
-	supplied_enum->destroy(supplied_enum);
-	DBG1(DBG_CFG, "received proposals: %#P", proposals);
-	DBG1(DBG_CFG, "configured proposals: %#P", this->proposals);
+	enumerator->destroy(enumerator);
+	return FALSE;
+}
 
-	return NULL;
+METHOD(ike_cfg_t, select_proposal, proposal_t*,
+	private_ike_cfg_t *this, linked_list_t *proposals, bool private,
+	bool prefer_self)
+{
+	enumerator_t *prefer_enum, *match_enum;
+	proposal_t *proposal, *match, *selected = NULL;
+
+	if (prefer_self)
+	{
+		prefer_enum = this->proposals->create_enumerator(this->proposals);
+		match_enum = proposals->create_enumerator(proposals);
+	}
+	else
+	{
+		prefer_enum = proposals->create_enumerator(proposals);
+		match_enum = this->proposals->create_enumerator(this->proposals);
+	}
+
+	while (prefer_enum->enumerate(prefer_enum, (void**)&proposal))
+	{
+		if (prefer_self)
+		{
+			proposals->reset_enumerator(proposals, match_enum);
+		}
+		else
+		{
+			this->proposals->reset_enumerator(this->proposals, match_enum);
+		}
+		while (match_enum->enumerate(match_enum, (void**)&match))
+		{
+			selected = proposal->select(proposal, match, prefer_self, private);
+			if (selected)
+			{
+				DBG2(DBG_CFG, "received proposals: %#P", proposals);
+				DBG2(DBG_CFG, "configured proposals: %#P", this->proposals);
+				DBG1(DBG_CFG, "selected proposal: %P", selected);
+				break;
+			}
+		}
+		if (selected)
+		{
+			break;
+		}
+	}
+	prefer_enum->destroy(prefer_enum);
+	match_enum->destroy(match_enum);
+	if (!selected)
+	{
+		DBG1(DBG_CFG, "received proposals: %#P", proposals);
+		DBG1(DBG_CFG, "configured proposals: %#P", this->proposals);
+	}
+	return selected;
 }
 
 METHOD(ike_cfg_t, get_dh_group, diffie_hellman_group_t,
@@ -353,7 +398,7 @@ METHOD(ike_cfg_t, get_dh_group, diffie_hellman_group_t,
 {
 	enumerator_t *enumerator;
 	proposal_t *proposal;
-	u_int16_t dh_group = MODP_NONE;
+	uint16_t dh_group = MODP_NONE;
 
 	enumerator = this->proposals->create_enumerator(this->proposals);
 	while (enumerator->enumerate(enumerator, &proposal))
@@ -371,9 +416,6 @@ METHOD(ike_cfg_t, equals, bool,
 	private_ike_cfg_t *this, ike_cfg_t *other_public)
 {
 	private_ike_cfg_t *other = (private_ike_cfg_t*)other_public;
-	enumerator_t *e1, *e2;
-	proposal_t *p1, *p2;
-	bool eq = TRUE;
 
 	if (this == other)
 	{
@@ -383,33 +425,21 @@ METHOD(ike_cfg_t, equals, bool,
 	{
 		return FALSE;
 	}
-	if (this->proposals->get_count(this->proposals) !=
-		other->proposals->get_count(other->proposals))
+	if (!this->proposals->equals_offset(this->proposals, other->proposals,
+										offsetof(proposal_t, equals)))
 	{
 		return FALSE;
 	}
-	e1 = this->proposals->create_enumerator(this->proposals);
-	e2 = other->proposals->create_enumerator(other->proposals);
-	while (e1->enumerate(e1, &p1) && e2->enumerate(e2, &p2))
-	{
-		if (!p1->equals(p1, p2))
-		{
-			eq = FALSE;
-			break;
-		}
-	}
-	e1->destroy(e1);
-	e2->destroy(e2);
-
-	return (eq &&
+	return
 		this->version == other->version &&
 		this->certreq == other->certreq &&
 		this->force_encap == other->force_encap &&
 		this->fragmentation == other->fragmentation &&
+		this->childless == other->childless &&
 		streq(this->me, other->me) &&
 		streq(this->other, other->other) &&
 		this->my_port == other->my_port &&
-		this->other_port == other->other_port);
+		this->other_port == other->other_port;
 }
 
 METHOD(ike_cfg_t, get_ref, ike_cfg_t*,
@@ -560,10 +590,41 @@ int ike_cfg_get_family(ike_cfg_t *cfg, bool local)
 /**
  * Described in header.
  */
-ike_cfg_t *ike_cfg_create(ike_version_t version, bool certreq, bool force_encap,
-						  char *me, u_int16_t my_port,
-						  char *other, u_int16_t other_port,
-						  fragmentation_t fragmentation, u_int8_t dscp)
+bool ike_cfg_has_address(ike_cfg_t *cfg, host_t *addr, bool local)
+{
+	private_ike_cfg_t *this = (private_ike_cfg_t*)cfg;
+	enumerator_t *enumerator;
+	host_t *host;
+	char *str;
+	bool found = FALSE;
+
+	if (local)
+	{
+		enumerator = this->my_hosts->create_enumerator(this->my_hosts);
+	}
+	else
+	{
+		enumerator = this->other_hosts->create_enumerator(this->other_hosts);
+	}
+	while (enumerator->enumerate(enumerator, &str))
+	{
+		host = host_create_from_string(str, 0);
+		if (host && addr->ip_equals(addr, host))
+		{
+			host->destroy(host);
+			found = TRUE;
+			break;
+		}
+		DESTROY_IF(host);
+	}
+	enumerator->destroy(enumerator);
+	return found;
+}
+
+/*
+ * Described in header
+ */
+ike_cfg_t *ike_cfg_create(ike_cfg_create_t *data)
 {
 	private_ike_cfg_t *this;
 
@@ -573,6 +634,7 @@ ike_cfg_t *ike_cfg_create(ike_version_t version, bool certreq, bool force_encap,
 			.send_certreq = _send_certreq,
 			.force_encap = _force_encap_,
 			.fragmentation = _fragmentation,
+			.childless = _childless,
 			.resolve_me = _resolve_me,
 			.resolve_other = _resolve_other,
 			.match_me = _match_me,
@@ -585,30 +647,32 @@ ike_cfg_t *ike_cfg_create(ike_version_t version, bool certreq, bool force_encap,
 			.add_proposal = _add_proposal,
 			.get_proposals = _get_proposals,
 			.select_proposal = _select_proposal,
+			.has_proposal = _has_proposal,
 			.get_dh_group = _get_dh_group,
 			.equals = _equals,
 			.get_ref = _get_ref,
 			.destroy = _destroy,
 		},
 		.refcount = 1,
-		.version = version,
-		.certreq = certreq,
-		.force_encap = force_encap,
-		.fragmentation = fragmentation,
-		.me = strdup(me),
+		.version = data->version,
+		.certreq = !data->no_certreq,
+		.force_encap = data->force_encap,
+		.fragmentation = data->fragmentation,
+		.childless = data->childless,
+		.me = strdup(data->local),
 		.my_ranges = linked_list_create(),
 		.my_hosts = linked_list_create(),
-		.other = strdup(other),
+		.other = strdup(data->remote),
 		.other_ranges = linked_list_create(),
 		.other_hosts = linked_list_create(),
-		.my_port = my_port,
-		.other_port = other_port,
-		.dscp = dscp,
+		.my_port = data->local_port,
+		.other_port = data->remote_port,
+		.dscp = data->dscp,
 		.proposals = linked_list_create(),
 	);
 
-	parse_addresses(me, this->my_hosts, this->my_ranges);
-	parse_addresses(other, this->other_hosts, this->other_ranges);
+	parse_addresses(data->local, this->my_hosts, this->my_ranges);
+	parse_addresses(data->remote, this->other_hosts, this->other_ranges);
 
 	return &this->public;
 }

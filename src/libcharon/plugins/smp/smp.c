@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2007 Martin Willi
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <inttypes.h>
 #include <libxml/xmlreader.h>
 #include <libxml/xmlwriter.h>
 
@@ -76,7 +77,8 @@ static void write_id(xmlTextWriterPtr writer, char *element, identification_t *i
 	switch (id->get_type(id))
 	{
 		{
-			char *type = "";
+			char *type;
+
 			while (TRUE)
 			{
 				case ID_ANY:
@@ -228,9 +230,9 @@ static void request_query_ikesa(xmlTextReaderPtr reader, xmlTextWriterPtr writer
 		/* <local> */
 		local = ike_sa->get_my_host(ike_sa);
 		xmlTextWriterStartElement(writer, "local");
-		xmlTextWriterWriteFormatElement(writer, "spi", "%.16llx",
-							id->is_initiator(id) ? id->get_initiator_spi(id)
-												 : id->get_responder_spi(id));
+		xmlTextWriterWriteFormatElement(writer, "spi", "%.16"PRIx64,
+					be64toh(id->is_initiator(id) ? id->get_initiator_spi(id)
+												 : id->get_responder_spi(id)));
 		write_id(writer, "identification", ike_sa->get_my_id(ike_sa));
 		write_address(writer, "address", local);
 		xmlTextWriterWriteFormatElement(writer, "port", "%d",
@@ -245,9 +247,9 @@ static void request_query_ikesa(xmlTextReaderPtr reader, xmlTextWriterPtr writer
 		/* <remote> */
 		remote = ike_sa->get_other_host(ike_sa);
 		xmlTextWriterStartElement(writer, "remote");
-		xmlTextWriterWriteFormatElement(writer, "spi", "%.16llx",
-							id->is_initiator(id) ? id->get_responder_spi(id)
-												 : id->get_initiator_spi(id));
+		xmlTextWriterWriteFormatElement(writer, "spi", "%.16"PRIx64,
+					be64toh(id->is_initiator(id) ? id->get_responder_spi(id)
+												 : id->get_initiator_spi(id)));
 		write_id(writer, "identification", ike_sa->get_other_id(ike_sa));
 		write_address(writer, "address", remote);
 		xmlTextWriterWriteFormatElement(writer, "port", "%d",
@@ -324,10 +326,12 @@ static void request_query_config(xmlTextReaderPtr reader, xmlTextWriterPtr write
 			xmlTextWriterStartElement(writer, "childconfig");
 			xmlTextWriterWriteElement(writer, "name",
 									  child_cfg->get_name(child_cfg));
-			list = child_cfg->get_traffic_selectors(child_cfg, TRUE, NULL, NULL);
+			list = child_cfg->get_traffic_selectors(child_cfg, TRUE, NULL,
+													NULL, FALSE);
 			write_networks(writer, "local", list);
 			list->destroy_offset(list, offsetof(traffic_selector_t, destroy));
-			list = child_cfg->get_traffic_selectors(child_cfg, FALSE, NULL, NULL);
+			list = child_cfg->get_traffic_selectors(child_cfg, FALSE, NULL,
+													NULL, FALSE);
 			write_networks(writer, "remote", list);
 			list->destroy_offset(list, offsetof(traffic_selector_t, destroy));
 			xmlTextWriterEndElement(writer);
@@ -374,7 +378,7 @@ static void request_control_terminate(xmlTextReaderPtr reader,
 		xmlTextReaderNodeType(reader) == XML_READER_TYPE_TEXT)
 	{
 		const char *str;
-		u_int32_t id;
+		uint32_t id;
 		status_t status;
 
 		str = xmlTextReaderConstValue(reader);
@@ -415,7 +419,7 @@ static void request_control_terminate(xmlTextReaderPtr reader,
 		if (ike)
 		{
 			status = charon->controller->terminate_ike(
-					charon->controller, id,
+					charon->controller, id, FALSE,
 					(controller_cb_t)xml_callback, writer, 0);
 		}
 		else

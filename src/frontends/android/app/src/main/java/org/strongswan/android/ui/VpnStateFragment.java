@@ -1,8 +1,8 @@
 /*
- * Copyright (C) 2012-2013 Tobias Brunner
+ * Copyright (C) 2012-2018 Tobias Brunner
  * Copyright (C) 2012 Giuliano Grassi
  * Copyright (C) 2012 Ralf Sager
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -17,8 +17,22 @@
 
 package org.strongswan.android.ui;
 
-import java.util.ArrayList;
-import java.util.List;
+import android.app.Service;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.ServiceConnection;
+import android.os.Bundle;
+import android.os.IBinder;
+import android.support.v4.app.Fragment;
+import android.support.v4.content.ContextCompat;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
 
 import org.strongswan.android.R;
 import org.strongswan.android.data.VpnProfile;
@@ -26,45 +40,25 @@ import org.strongswan.android.logic.VpnStateService;
 import org.strongswan.android.logic.VpnStateService.ErrorState;
 import org.strongswan.android.logic.VpnStateService.State;
 import org.strongswan.android.logic.VpnStateService.VpnStateListener;
-import org.strongswan.android.logic.imc.ImcState;
-import org.strongswan.android.logic.imc.RemediationInstruction;
-
-import android.app.AlertDialog;
-import android.app.Fragment;
-import android.app.ProgressDialog;
-import android.app.Service;
-import android.content.ComponentName;
-import android.content.Context;
-import android.content.DialogInterface;
-import android.content.Intent;
-import android.content.ServiceConnection;
-import android.os.Bundle;
-import android.os.IBinder;
-import android.view.LayoutInflater;
-import android.view.View;
-import android.view.View.OnClickListener;
-import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.TextView;
 
 public class VpnStateFragment extends Fragment implements VpnStateListener
 {
-	private static final String KEY_ERROR_CONNECTION_ID = "error_connection_id";
-	private static final String KEY_DISMISSED_CONNECTION_ID = "dismissed_connection_id";
-
+	private boolean mVisible;
 	private TextView mProfileNameView;
 	private TextView mProfileView;
 	private TextView mStateView;
-	private int stateBaseColor;
+	private int mColorStateBase;
+	private int mColorStateError;
+	private int mColorStateSuccess;
 	private Button mActionButton;
-	private ProgressDialog mConnectDialog;
-	private ProgressDialog mDisconnectDialog;
-	private ProgressDialog mProgressDialog;
-	private AlertDialog mErrorDialog;
-	private long mErrorConnectionID;
-	private long mDismissedConnectionID;
+	private ProgressBar mProgress;
+	private LinearLayout mErrorView;
+	private TextView mErrorText;
+	private Button mErrorRetry;
+	private Button mShowLog;
 	private VpnStateService mService;
-	private final ServiceConnection mServiceConnection = new ServiceConnection() {
+	private final ServiceConnection mServiceConnection = new ServiceConnection()
+	{
 		@Override
 		public void onServiceDisconnected(ComponentName name)
 		{
@@ -75,8 +69,11 @@ public class VpnStateFragment extends Fragment implements VpnStateListener
 		public void onServiceConnected(ComponentName name, IBinder service)
 		{
 			mService = ((VpnStateService.LocalBinder)service).getService();
-			mService.registerListener(VpnStateFragment.this);
-			updateView();
+			if (mVisible)
+			{
+				mService.registerListener(VpnStateFragment.this);
+				updateView();
+			}
 		}
 	};
 
@@ -85,27 +82,13 @@ public class VpnStateFragment extends Fragment implements VpnStateListener
 	{
 		super.onCreate(savedInstanceState);
 
+		mColorStateError = ContextCompat.getColor(getActivity(), R.color.error_text);
+		mColorStateSuccess = ContextCompat.getColor(getActivity(), R.color.success_text);
+
 		/* bind to the service only seems to work from the ApplicationContext */
 		Context context = getActivity().getApplicationContext();
 		context.bindService(new Intent(context, VpnStateService.class),
 							mServiceConnection, Service.BIND_AUTO_CREATE);
-
-		mErrorConnectionID = 0;
-		mDismissedConnectionID = 0;
-		if (savedInstanceState != null && savedInstanceState.containsKey(KEY_ERROR_CONNECTION_ID))
-		{
-			mErrorConnectionID = (Long)savedInstanceState.getSerializable(KEY_ERROR_CONNECTION_ID);
-			mDismissedConnectionID = (Long)savedInstanceState.getSerializable(KEY_DISMISSED_CONNECTION_ID);
-		}
-	}
-
-	@Override
-	public void onSaveInstanceState(Bundle outState)
-	{
-		super.onSaveInstanceState(outState);
-
-		outState.putSerializable(KEY_ERROR_CONNECTION_ID, mErrorConnectionID);
-		outState.putSerializable(KEY_DISMISSED_CONNECTION_ID, mDismissedConnectionID);
 	}
 
 	@Override
@@ -115,22 +98,34 @@ public class VpnStateFragment extends Fragment implements VpnStateListener
 		View view = inflater.inflate(R.layout.vpn_state_fragment, null);
 
 		mActionButton = (Button)view.findViewById(R.id.action);
-		mActionButton.setOnClickListener(new OnClickListener() {
-			@Override
-			public void onClick(View v)
+		mActionButton.setOnClickListener(v -> {
+			if (mService != null)
 			{
-				if (mService != null)
-				{
-					mService.disconnect();
-				}
+				mService.disconnect();
 			}
 		});
-		enableActionButton(false);
+		enableActionButton(null);
 
+		mErrorView = view.findViewById(R.id.vpn_error);
+		mErrorText = view.findViewById(R.id.vpn_error_text);
+		mErrorRetry = view.findViewById(R.id.retry);
+		mShowLog = view.findViewById(R.id.show_log);
+		mProgress = (ProgressBar)view.findViewById(R.id.progress);
 		mStateView = (TextView)view.findViewById(R.id.vpn_state);
-		stateBaseColor = mStateView.getCurrentTextColor();
+		mColorStateBase = mStateView.getCurrentTextColor();
 		mProfileView = (TextView)view.findViewById(R.id.vpn_profile_label);
 		mProfileNameView = (TextView)view.findViewById(R.id.vpn_profile_name);
+
+		mErrorRetry.setOnClickListener(v -> {
+			if (mService != null)
+			{
+				mService.reconnect();
+			}
+		});
+		mShowLog.setOnClickListener(v -> {
+			Intent intent = new Intent(getActivity(), LogActivity.class);
+			startActivity(intent);
+		});
 
 		return view;
 	}
@@ -139,6 +134,7 @@ public class VpnStateFragment extends Fragment implements VpnStateListener
 	public void onStart()
 	{
 		super.onStart();
+		mVisible = true;
 		if (mService != null)
 		{
 			mService.registerListener(this);
@@ -150,12 +146,11 @@ public class VpnStateFragment extends Fragment implements VpnStateListener
 	public void onStop()
 	{
 		super.onStop();
+		mVisible = false;
 		if (mService != null)
 		{
 			mService.unregisterListener(this);
 		}
-		hideErrorDialog();
-		hideProgressDialog();
 	}
 
 	@Override
@@ -180,103 +175,89 @@ public class VpnStateFragment extends Fragment implements VpnStateListener
 		VpnProfile profile = mService.getProfile();
 		State state = mService.getState();
 		ErrorState error = mService.getErrorState();
-		ImcState imcState = mService.getImcState();
-		String name = "", gateway = "";
+		String name = "";
 
-		if (profile != null)
-		{
-			name = profile.getName();
-			gateway = profile.getGateway();
-		}
-
-		if (reportError(connectionID, name, error, imcState))
+		if (getActivity() == null)
 		{
 			return;
 		}
 
-		enableActionButton(false);
+		if (profile != null)
+		{
+			name = profile.getName();
+		}
+
+		if (reportError(connectionID, name, error))
+		{
+			return;
+		}
+
 		mProfileNameView.setText(name);
+		mProgress.setIndeterminate(true);
 
 		switch (state)
 		{
 			case DISABLED:
 				showProfile(false);
-				hideProgressDialog();
+				mProgress.setVisibility(View.GONE);
+				enableActionButton(null);
 				mStateView.setText(R.string.state_disabled);
-				mStateView.setTextColor(stateBaseColor);
+				mStateView.setTextColor(mColorStateBase);
 				break;
 			case CONNECTING:
 				showProfile(true);
-				showConnectDialog(name, gateway);
+				mProgress.setVisibility(View.VISIBLE);
+				enableActionButton(getString(android.R.string.cancel));
 				mStateView.setText(R.string.state_connecting);
-				mStateView.setTextColor(stateBaseColor);
+				mStateView.setTextColor(mColorStateBase);
 				break;
 			case CONNECTED:
 				showProfile(true);
-				hideProgressDialog();
-				enableActionButton(true);
+				mProgress.setVisibility(View.GONE);
+				enableActionButton(getString(R.string.disconnect));
 				mStateView.setText(R.string.state_connected);
-				mStateView.setTextColor(getResources().getColor(R.color.success_text));
+				mStateView.setTextColor(mColorStateSuccess);
 				break;
 			case DISCONNECTING:
 				showProfile(true);
-				showDisconnectDialog(name);
+				mProgress.setVisibility(View.VISIBLE);
+				enableActionButton(null);
 				mStateView.setText(R.string.state_disconnecting);
-				mStateView.setTextColor(stateBaseColor);
+				mStateView.setTextColor(mColorStateBase);
 				break;
 		}
 	}
 
-	private boolean reportError(long connectionID, String name, ErrorState error, ImcState imcState)
+	private boolean reportError(long connectionID, String name, ErrorState error)
 	{
-		if (connectionID > mDismissedConnectionID)
-		{	/* report error if it hasn't been dismissed yet */
-			mErrorConnectionID = connectionID;
-		}
-		else
-		{	/* ignore all other errors */
-			error = ErrorState.NO_ERROR;
-		}
 		if (error == ErrorState.NO_ERROR)
 		{
-			hideErrorDialog();
+			mErrorView.setVisibility(View.GONE);
 			return false;
 		}
-		else if (mErrorDialog != null)
-		{	/* we already show the dialog */
-			return true;
-		}
-		hideProgressDialog();
 		mProfileNameView.setText(name);
 		showProfile(true);
-		enableActionButton(false);
 		mStateView.setText(R.string.state_error);
-		mStateView.setTextColor(getResources().getColor(R.color.error_text));
-		switch (error)
+		mStateView.setTextColor(mColorStateError);
+		enableActionButton(getString(android.R.string.cancel));
+
+		int retry = mService.getRetryIn();
+		if (retry > 0)
 		{
-			case AUTH_FAILED:
-				if (imcState == ImcState.BLOCK)
-				{
-					showErrorDialog(R.string.error_assessment_failed);
-				}
-				else
-				{
-					showErrorDialog(R.string.error_auth_failed);
-				}
-				break;
-			case PEER_AUTH_FAILED:
-				showErrorDialog(R.string.error_peer_auth_failed);
-				break;
-			case LOOKUP_FAILED:
-				showErrorDialog(R.string.error_lookup_failed);
-				break;
-			case UNREACHABLE:
-				showErrorDialog(R.string.error_unreachable);
-				break;
-			default:
-				showErrorDialog(R.string.error_generic);
-				break;
+			mProgress.setIndeterminate(false);
+			mProgress.setMax(mService.getRetryTimeout());
+			mProgress.setProgress(retry);
+			mProgress.setVisibility(View.VISIBLE);
+			mStateView.setText(getResources().getQuantityString(R.plurals.retry_in, retry, retry));
 		}
+		else if (mService.getRetryTimeout() <= 0)
+		{
+			mProgress.setVisibility(View.GONE);
+		}
+
+		String text = getString(R.string.error_format, getString(mService.getErrorText()));
+		mErrorText.setText(text);
+		mErrorView.setVisibility(View.VISIBLE);
 		return true;
 	}
 
@@ -286,129 +267,10 @@ public class VpnStateFragment extends Fragment implements VpnStateListener
 		mProfileNameView.setVisibility(show ? View.VISIBLE : View.GONE);
 	}
 
-	private void enableActionButton(boolean enable)
+	private void enableActionButton(String text)
 	{
-		mActionButton.setEnabled(enable);
-		mActionButton.setVisibility(enable ? View.VISIBLE : View.GONE);
-	}
-
-	private void hideProgressDialog()
-	{
-		if (mProgressDialog != null)
-		{
-			mProgressDialog.dismiss();
-			mProgressDialog = null;
-			mDisconnectDialog = mConnectDialog = null;
-		}
-	}
-
-	private void hideErrorDialog()
-	{
-		if (mErrorDialog != null)
-		{
-			mErrorDialog.dismiss();
-			mErrorDialog = null;
-		}
-	}
-
-	private void clearError()
-	{
-		if (mService != null)
-		{
-			mService.disconnect();
-		}
-		mDismissedConnectionID = mErrorConnectionID;
-		updateView();
-	}
-
-	private void showConnectDialog(String profile, String gateway)
-	{
-		if (mConnectDialog != null)
-		{	/* already showing the dialog */
-			return;
-		}
-		hideProgressDialog();
-		mConnectDialog = new ProgressDialog(getActivity());
-		mConnectDialog.setTitle(String.format(getString(R.string.connecting_title), profile));
-		mConnectDialog.setMessage(String.format(getString(R.string.connecting_message), gateway));
-		mConnectDialog.setIndeterminate(true);
-		mConnectDialog.setCancelable(false);
-		mConnectDialog.setButton(DialogInterface.BUTTON_NEGATIVE,
-			  getString(android.R.string.cancel),
-			  new DialogInterface.OnClickListener()
-			  {
-				  @Override
-				  public void onClick(DialogInterface dialog, int which)
-				  {
-					  if (mService != null)
-					  {
-						  mService.disconnect();
-					  }
-				  }
-			  });
-		mConnectDialog.show();
-		mProgressDialog = mConnectDialog;
-	}
-
-	private void showDisconnectDialog(String profile)
-	{
-		if (mDisconnectDialog != null)
-		{	/* already showing the dialog */
-			return;
-		}
-		hideProgressDialog();
-		mDisconnectDialog = new ProgressDialog(getActivity());
-		mDisconnectDialog.setMessage(getString(R.string.state_disconnecting));
-		mDisconnectDialog.setIndeterminate(true);
-		mDisconnectDialog.setCancelable(false);
-		mDisconnectDialog.show();
-		mProgressDialog = mDisconnectDialog;
-	}
-
-	private void showErrorDialog(int textid)
-	{
-		final List<RemediationInstruction> instructions = mService.getRemediationInstructions();
-		final boolean show_instructions = mService.getImcState() == ImcState.BLOCK && !instructions.isEmpty();
-		int text = show_instructions ? R.string.show_remediation_instructions : R.string.show_log;
-
-		mErrorDialog = new AlertDialog.Builder(getActivity())
-			.setMessage(getString(R.string.error_introduction) + " " + getString(textid))
-			.setCancelable(false)
-			.setNeutralButton(text, new DialogInterface.OnClickListener() {
-				@Override
-				public void onClick(DialogInterface dialog, int which)
-				{
-					clearError();
-					dialog.dismiss();
-					Intent intent;
-					if (show_instructions)
-					{
-						intent = new Intent(getActivity(), RemediationInstructionsActivity.class);
-						intent.putParcelableArrayListExtra(RemediationInstructionsFragment.EXTRA_REMEDIATION_INSTRUCTIONS,
-														   new ArrayList<RemediationInstruction>(instructions));
-					}
-					else
-					{
-						intent = new Intent(getActivity(), LogActivity.class);
-					}
-					startActivity(intent);
-				}
-			})
-			.setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
-				@Override
-				public void onClick(DialogInterface dialog, int id)
-				{
-					clearError();
-					dialog.dismiss();
-				}
-			}).create();
-		mErrorDialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
-			@Override
-			public void onDismiss(DialogInterface dialog)
-			{
-				mErrorDialog = null;
-			}
-		});
-		mErrorDialog.show();
+		mActionButton.setText(text);
+		mActionButton.setEnabled(text != null);
+		mActionButton.setVisibility(text != null ? View.VISIBLE : View.GONE);
 	}
 }

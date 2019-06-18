@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2009 Martin Willi
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -116,6 +116,7 @@ TEST_VECTOR_AEAD(aes_gcm23)
 TEST_VECTOR_AEAD(chacha20poly1305_1)
 TEST_VECTOR_AEAD(chacha20poly1305_2)
 TEST_VECTOR_AEAD(chacha20poly1305_3)
+TEST_VECTOR_AEAD(chacha20poly1305_4)
 
 TEST_VECTOR_SIGNER(aes_xcbc_s1)
 TEST_VECTOR_SIGNER(aes_xcbc_s2)
@@ -258,6 +259,21 @@ TEST_VECTOR_PRF(sha512_hmac_p5)
 TEST_VECTOR_PRF(sha512_hmac_p6)
 TEST_VECTOR_PRF(fips_prf_1)
 
+TEST_VECTOR_XOF(shake_128_0)
+TEST_VECTOR_XOF(shake_128_32)
+TEST_VECTOR_XOF(shake_128_167)
+TEST_VECTOR_XOF(shake_128_168)
+TEST_VECTOR_XOF(shake_128_255)
+TEST_VECTOR_XOF(shake_256_0)
+TEST_VECTOR_XOF(shake_256_64)
+TEST_VECTOR_XOF(shake_256_135)
+TEST_VECTOR_XOF(shake_256_136)
+TEST_VECTOR_XOF(shake_256_255)
+TEST_VECTOR_XOF(chacha20_xof_1)
+TEST_VECTOR_XOF(chacha20_xof_2)
+TEST_VECTOR_XOF(chacha20_xof_3)
+TEST_VECTOR_XOF(chacha20_xof_4)
+
 TEST_VECTOR_RNG(rng_monobit_1)
 TEST_VECTOR_RNG(rng_monobit_2)
 TEST_VECTOR_RNG(rng_monobit_3)
@@ -288,3 +304,6 @@ TEST_VECTOR_DH(ecp224bp)
 TEST_VECTOR_DH(ecp256bp)
 TEST_VECTOR_DH(ecp384bp)
 TEST_VECTOR_DH(ecp512bp)
+TEST_VECTOR_DH(curve25519_1)
+TEST_VECTOR_DH(curve25519_2)
+TEST_VECTOR_DH(curve448_1)

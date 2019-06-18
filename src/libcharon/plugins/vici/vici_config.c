@@ -2,7 +2,8 @@
  * Copyright (C) 2014 Martin Willi
  * Copyright (C) 2014 revosec AG
  *
- * Copyright (C) 2015 Andreas Steffen
+ * Copyright (C) 2015-2019 Tobias Brunner
+ * Copyright (C) 2015-2018 Andreas Steffen
  * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -45,6 +46,7 @@
 
 #include <daemon.h>
 #include <threading/rwlock.h>
+#include <threading/rwlock_condvar.h>
 #include <collections/array.h>
 #include <collections/linked_list.h>
 
@@ -55,22 +57,32 @@
 /**
  * Magic value for an undefined lifetime
  */
-#define LFT_UNDEFINED (~(u_int64_t)0)
+#define LFT_UNDEFINED (~(uint64_t)0)
 
 /**
  * Default IKE rekey time
  */
-#define LFT_DEFAULT_IKE_REKEY (4 * 60 * 60)
+#define LFT_DEFAULT_IKE_REKEY_TIME		(4 * 60 * 60)
 
 /**
  * Default CHILD rekey time
  */
-#define LFT_DEFAULT_CHILD_REKEY (1 * 60 * 60)
+#define LFT_DEFAULT_CHILD_REKEY_TIME	(1 * 60 * 60)
+
+/**
+ * Default CHILD rekey bytes
+ */
+#define LFT_DEFAULT_CHILD_REKEY_BYTES		0
+
+/**
+ * Default CHILD rekey packets
+ */
+#define LFT_DEFAULT_CHILD_REKEY_PACKETS		0
 
 /**
  * Undefined replay window
  */
-#define REPLAY_UNDEFINED (~(u_int32_t)0)
+#define REPLAY_UNDEFINED (~(uint32_t)0)
 
 typedef struct private_vici_config_t private_vici_config_t;
 
@@ -100,6 +112,16 @@ struct private_vici_config_t {
 	rwlock_t *lock;
 
 	/**
+	 * Condvar used to sync running actions
+	 */
+	rwlock_condvar_t *condvar;
+
+	/**
+	 * True while we run or undo a start action
+	 */
+	bool handling_actions;
+
+	/**
 	 * Credential backend managed by VICI used for our certificates
 	 */
 	vici_cred_t *cred;
@@ -119,13 +141,20 @@ METHOD(backend_t, create_peer_cfg_enumerator, enumerator_t*,
 									 (void*)this->lock->unlock, this->lock);
 }
 
-/**
- * Enumerator filter function for ike configs
- */
-static bool ike_filter(void *data, peer_cfg_t **in, ike_cfg_t **out)
+CALLBACK(ike_filter, bool,
+	void *data, enumerator_t *orig, va_list args)
 {
-	*out = (*in)->get_ike_cfg(*in);
-	return TRUE;
+	peer_cfg_t *cfg;
+	ike_cfg_t **out;
+
+	VA_ARGS_VGET(args, out);
+
+	if (orig->enumerate(orig, &cfg))
+	{
+		*out = cfg->get_ike_cfg(cfg);
+		return TRUE;
+	}
+	return FALSE;
 }
 
 METHOD(backend_t, create_ike_cfg_enumerator, enumerator_t*,
@@ -133,7 +162,7 @@ METHOD(backend_t, create_ike_cfg_enumerator, enumerator_t*,
 {
 	this->lock->read_lock(this->lock);
 	return enumerator_create_filter(this->conns->create_enumerator(this->conns),
-									(void*)ike_filter, this->lock,
+									ike_filter, this->lock,
 									(void*)this->lock->unlock);
 }
 
@@ -225,24 +254,67 @@ typedef struct {
 } request_data_t;
 
 /**
+ * Certificate data
+ */
+typedef struct {
+	request_data_t *request;
+	char *handle;
+	uint32_t slot;
+	char *module;
+	char *file;
+} cert_data_t;
+
+/**
+ * Clean up certificate data
+ */
+static void free_cert_data(cert_data_t *data)
+{
+	free(data->handle);
+	free(data->module);
+	free(data->file);
+	free(data);
+}
+
+/**
+ * Auth config data
+ */
+typedef struct {
+	request_data_t *request;
+	auth_cfg_t *cfg;
+	uint32_t round;
+} auth_data_t;
+
+/**
+ * Clean up auth config data
+ */
+static void free_auth_data(auth_data_t *data)
+{
+	DESTROY_IF(data->cfg);
+	free(data);
+}
+
+/**
  * Data associated to a peer config
  */
 typedef struct {
 	request_data_t *request;
-	u_int32_t version;
+	uint32_t version;
 	bool aggressive;
 	bool encap;
 	bool mobike;
 	bool send_certreq;
 	bool pull;
+	identification_t *ppk_id;
+	bool ppk_required;
 	cert_policy_t send_cert;
-	u_int64_t dpd_delay;
-	u_int64_t dpd_timeout;
+	uint64_t dpd_delay;
+	uint64_t dpd_timeout;
 	fragmentation_t fragmentation;
+	childless_t childless;
 	unique_policy_t unique;
-	u_int32_t keyingtries;
-	u_int32_t local_port;
-	u_int32_t remote_port;
+	uint32_t keyingtries;
+	uint32_t local_port;
+	uint32_t remote_port;
 	char *local_addrs;
 	char *remote_addrs;
 	linked_list_t *local;
@@ -251,10 +323,18 @@ typedef struct {
 	linked_list_t *children;
 	linked_list_t *vips;
 	char *pools;
-	u_int64_t reauth_time;
-	u_int64_t rekey_time;
-	u_int64_t over_time;
-	u_int64_t rand_time;
+	uint64_t reauth_time;
+	uint64_t rekey_time;
+	uint64_t over_time;
+	uint64_t rand_time;
+	uint8_t dscp;
+	uint32_t if_id_in;
+	uint32_t if_id_out;
+#ifdef ME
+	bool mediation;
+	char *mediated_by;
+	identification_t *peer_id;
+#endif /* ME */
 } peer_data_t;
 
 /**
@@ -318,7 +398,7 @@ static void log_auth(auth_cfg_t *auth)
 static void log_peer_data(peer_data_t *data)
 {
 	enumerator_t *enumerator;
-	auth_cfg_t *auth;
+	auth_data_t *auth;
 	host_t *host;
 
 	DBG2(DBG_CFG, "  version = %u", data->version);
@@ -328,12 +408,16 @@ static void log_peer_data(peer_data_t *data)
 	DBG2(DBG_CFG, "  remote_port = %u", data->remote_port);
 	DBG2(DBG_CFG, "  send_certreq = %u", data->send_certreq);
 	DBG2(DBG_CFG, "  send_cert = %N", cert_policy_names, data->send_cert);
+	DBG2(DBG_CFG, "  ppk_id = %Y",  data->ppk_id);
+	DBG2(DBG_CFG, "  ppk_required = %u",  data->ppk_required);
 	DBG2(DBG_CFG, "  mobike = %u", data->mobike);
 	DBG2(DBG_CFG, "  aggressive = %u", data->aggressive);
+	DBG2(DBG_CFG, "  dscp = 0x%.2x", data->dscp);
 	DBG2(DBG_CFG, "  encap = %u", data->encap);
 	DBG2(DBG_CFG, "  dpd_delay = %llu", data->dpd_delay);
 	DBG2(DBG_CFG, "  dpd_timeout = %llu", data->dpd_timeout);
 	DBG2(DBG_CFG, "  fragmentation = %u",  data->fragmentation);
+	DBG2(DBG_CFG, "  childless = %u",  data->childless);
 	DBG2(DBG_CFG, "  unique = %N", unique_policy_names, data->unique);
 	DBG2(DBG_CFG, "  keyingtries = %u", data->keyingtries);
 	DBG2(DBG_CFG, "  reauth_time = %llu", data->reauth_time);
@@ -341,6 +425,16 @@ static void log_peer_data(peer_data_t *data)
 	DBG2(DBG_CFG, "  over_time = %llu", data->over_time);
 	DBG2(DBG_CFG, "  rand_time = %llu", data->rand_time);
 	DBG2(DBG_CFG, "  proposals = %#P", data->proposals);
+	DBG2(DBG_CFG, "  if_id_in = %u", data->if_id_in);
+	DBG2(DBG_CFG, "  if_id_out = %u", data->if_id_out);
+#ifdef ME
+	DBG2(DBG_CFG, "  mediation = %u", data->mediation);
+	if (data->mediated_by)
+	{
+		DBG2(DBG_CFG, "  mediated_by = %s", data->mediated_by);
+		DBG2(DBG_CFG, "  mediation_peer = %Y", data->peer_id);
+	}
+#endif /* ME */
 
 	if (data->vips->get_count(data->vips))
 	{
@@ -357,7 +451,7 @@ static void log_peer_data(peer_data_t *data)
 	while (enumerator->enumerate(enumerator, &auth))
 	{
 		DBG2(DBG_CFG, "  local:");
-		log_auth(auth);
+		log_auth(auth->cfg);
 	}
 	enumerator->destroy(enumerator);
 
@@ -365,7 +459,7 @@ static void log_peer_data(peer_data_t *data)
 	while (enumerator->enumerate(enumerator, &auth))
 	{
 		DBG2(DBG_CFG, "  remote:");
-		log_auth(auth);
+		log_auth(auth->cfg);
 	}
 	enumerator->destroy(enumerator);
 }
@@ -375,10 +469,8 @@ static void log_peer_data(peer_data_t *data)
  */
 static void free_peer_data(peer_data_t *data)
 {
-	data->local->destroy_offset(data->local,
-									offsetof(auth_cfg_t, destroy));
-	data->remote->destroy_offset(data->remote,
-									offsetof(auth_cfg_t, destroy));
+	data->local->destroy_function(data->local, (void*)free_auth_data);
+	data->remote->destroy_function(data->remote, (void*)free_auth_data);
 	data->children->destroy_offset(data->children,
 									offsetof(child_cfg_t, destroy));
 	data->proposals->destroy_offset(data->proposals,
@@ -387,6 +479,11 @@ static void free_peer_data(peer_data_t *data)
 	free(data->pools);
 	free(data->local_addrs);
 	free(data->remote_addrs);
+	DESTROY_IF(data->ppk_id);
+#ifdef ME
+	free(data->mediated_by);
+	DESTROY_IF(data->peer_id);
+#endif /* ME */
 }
 
 /**
@@ -394,24 +491,11 @@ static void free_peer_data(peer_data_t *data)
  */
 typedef struct {
 	request_data_t *request;
-	lifetime_cfg_t lft;
-	char* updown;
-	bool hostaccess;
-	bool ipcomp;
-	bool policies;
-	ipsec_mode_t mode;
-	u_int32_t replay_window;
-	action_t dpd_action;
-	action_t start_action;
-	action_t close_action;
-	u_int32_t reqid;
-	u_int32_t tfc;
-	mark_t mark_in;
-	mark_t mark_out;
-	u_int64_t inactivity;
 	linked_list_t *proposals;
 	linked_list_t *local_ts;
 	linked_list_t *remote_ts;
+	uint32_t replay_window;
+	child_cfg_create_t cfg;
 } child_data_t;
 
 /**
@@ -419,38 +503,57 @@ typedef struct {
  */
 static void log_child_data(child_data_t *data, char *name)
 {
+	child_cfg_create_t *cfg = &data->cfg;
+
+#define has_opt(opt) ({ (cfg->options & (opt)) == (opt); })
 	DBG2(DBG_CFG, "  child %s:", name);
-	DBG2(DBG_CFG, "   rekey_time = %llu", data->lft.time.rekey);
-	DBG2(DBG_CFG, "   life_time = %llu", data->lft.time.life);
-	DBG2(DBG_CFG, "   rand_time = %llu", data->lft.time.jitter);
-	DBG2(DBG_CFG, "   rekey_bytes = %llu", data->lft.bytes.rekey);
-	DBG2(DBG_CFG, "   life_bytes = %llu", data->lft.bytes.life);
-	DBG2(DBG_CFG, "   rand_bytes = %llu", data->lft.bytes.jitter);
-	DBG2(DBG_CFG, "   rekey_packets = %llu", data->lft.packets.rekey);
-	DBG2(DBG_CFG, "   life_packets = %llu", data->lft.packets.life);
-	DBG2(DBG_CFG, "   rand_packets = %llu", data->lft.packets.jitter);
-	DBG2(DBG_CFG, "   updown = %s", data->updown);
-	DBG2(DBG_CFG, "   hostaccess = %u", data->hostaccess);
-	DBG2(DBG_CFG, "   ipcomp = %u", data->ipcomp);
-	DBG2(DBG_CFG, "   mode = %N", ipsec_mode_names, data->mode);
-	DBG2(DBG_CFG, "   policies = %u", data->policies);
+	DBG2(DBG_CFG, "   rekey_time = %llu", cfg->lifetime.time.rekey);
+	DBG2(DBG_CFG, "   life_time = %llu", cfg->lifetime.time.life);
+	DBG2(DBG_CFG, "   rand_time = %llu", cfg->lifetime.time.jitter);
+	DBG2(DBG_CFG, "   rekey_bytes = %llu", cfg->lifetime.bytes.rekey);
+	DBG2(DBG_CFG, "   life_bytes = %llu", cfg->lifetime.bytes.life);
+	DBG2(DBG_CFG, "   rand_bytes = %llu", cfg->lifetime.bytes.jitter);
+	DBG2(DBG_CFG, "   rekey_packets = %llu", cfg->lifetime.packets.rekey);
+	DBG2(DBG_CFG, "   life_packets = %llu", cfg->lifetime.packets.life);
+	DBG2(DBG_CFG, "   rand_packets = %llu", cfg->lifetime.packets.jitter);
+	DBG2(DBG_CFG, "   updown = %s", cfg->updown);
+	DBG2(DBG_CFG, "   hostaccess = %u", has_opt(OPT_HOSTACCESS));
+	DBG2(DBG_CFG, "   ipcomp = %u", has_opt(OPT_IPCOMP));
+	DBG2(DBG_CFG, "   mode = %N%s", ipsec_mode_names, cfg->mode,
+		 has_opt(OPT_PROXY_MODE) ? "_PROXY" : "");
+	DBG2(DBG_CFG, "   policies = %u", !has_opt(OPT_NO_POLICIES));
+	DBG2(DBG_CFG, "   policies_fwd_out = %u", has_opt(OPT_FWD_OUT_POLICIES));
 	if (data->replay_window != REPLAY_UNDEFINED)
 	{
 		DBG2(DBG_CFG, "   replay_window = %u", data->replay_window);
 	}
-	DBG2(DBG_CFG, "   dpd_action = %N", action_names, data->dpd_action);
-	DBG2(DBG_CFG, "   start_action = %N", action_names, data->start_action);
-	DBG2(DBG_CFG, "   close_action = %N", action_names, data->close_action);
-	DBG2(DBG_CFG, "   reqid = %u", data->reqid);
-	DBG2(DBG_CFG, "   tfc = %d", data->tfc);
+	DBG2(DBG_CFG, "   dpd_action = %N", action_names, cfg->dpd_action);
+	DBG2(DBG_CFG, "   start_action = %N", action_names, cfg->start_action);
+	DBG2(DBG_CFG, "   close_action = %N", action_names, cfg->close_action);
+	DBG2(DBG_CFG, "   reqid = %u", cfg->reqid);
+	DBG2(DBG_CFG, "   tfc = %d", cfg->tfc);
+	DBG2(DBG_CFG, "   priority = %d", cfg->priority);
+	DBG2(DBG_CFG, "   interface = %s", cfg->interface);
+	DBG2(DBG_CFG, "   if_id_in = %u", cfg->if_id_in);
+	DBG2(DBG_CFG, "   if_id_out = %u", cfg->if_id_out);
 	DBG2(DBG_CFG, "   mark_in = %u/%u",
-		 data->mark_in.value, data->mark_in.mask);
+		 cfg->mark_in.value, cfg->mark_in.mask);
+	DBG2(DBG_CFG, "   mark_in_sa = %u", has_opt(OPT_MARK_IN_SA));
 	DBG2(DBG_CFG, "   mark_out = %u/%u",
-		 data->mark_out.value, data->mark_out.mask);
-	DBG2(DBG_CFG, "   inactivity = %llu", data->inactivity);
+		 cfg->mark_out.value, cfg->mark_out.mask);
+	DBG2(DBG_CFG, "   set_mark_in = %u/%u",
+		 cfg->set_mark_in.value, cfg->set_mark_in.mask);
+	DBG2(DBG_CFG, "   set_mark_out = %u/%u",
+		 cfg->set_mark_out.value, cfg->set_mark_out.mask);
+	DBG2(DBG_CFG, "   inactivity = %llu", cfg->inactivity);
 	DBG2(DBG_CFG, "   proposals = %#P", data->proposals);
 	DBG2(DBG_CFG, "   local_ts = %#R", data->local_ts);
 	DBG2(DBG_CFG, "   remote_ts = %#R", data->remote_ts);
+	DBG2(DBG_CFG, "   hw_offload = %N", hw_offload_names, cfg->hw_offload);
+	DBG2(DBG_CFG, "   sha256_96 = %u", has_opt(OPT_SHA256_96));
+	DBG2(DBG_CFG, "   copy_df = %u", !has_opt(OPT_NO_COPY_DF));
+	DBG2(DBG_CFG, "   copy_ecn = %u", !has_opt(OPT_NO_COPY_ECN));
+	DBG2(DBG_CFG, "   copy_dscp = %N", dscp_copy_names, cfg->copy_dscp);
 }
 
 /**
@@ -464,23 +567,16 @@ static void free_child_data(child_data_t *data)
 									offsetof(traffic_selector_t, destroy));
 	data->remote_ts->destroy_offset(data->remote_ts,
 									offsetof(traffic_selector_t, destroy));
-	free(data->updown);
+	free(data->cfg.updown);
+	free(data->cfg.interface);
 }
-
-/**
- * Auth config data
- */
-typedef struct {
-	request_data_t *request;
-	auth_cfg_t *cfg;
-} auth_data_t;
 
 /**
  * Common proposal parsing
  */
 static bool parse_proposal(linked_list_t *list, protocol_id_t proto, chunk_t v)
 {
-	char buf[128];
+	char buf[BUF_LEN];
 	proposal_t *proposal;
 
 	if (!vici_stringify(v, buf, sizeof(buf)))
@@ -543,13 +639,13 @@ CALLBACK(parse_ah_proposal, bool,
 CALLBACK(parse_ts, bool,
 	linked_list_t *out, chunk_t v)
 {
-	char buf[128], *protoport, *sep, *port = "", *end;
-	traffic_selector_t *ts;
+	char buf[BUF_LEN], *protoport, *sep, *port = "", *end;
+	traffic_selector_t *ts = NULL;
 	struct protoent *protoent;
 	struct servent *svc;
 	long int p;
-	u_int16_t from = 0, to = 0xffff;
-	u_int8_t proto = 0;
+	uint16_t from = 0, to = 0xffff;
+	uint8_t proto = 0;
 
 	if (!vici_stringify(v, buf, sizeof(buf)))
 	{
@@ -593,7 +689,7 @@ CALLBACK(parse_ts, bool,
 				{
 					return FALSE;
 				}
-				proto = (u_int8_t)p;
+				proto = (uint8_t)p;
 			}
 		}
 		if (streq(port, "opaque"))
@@ -636,6 +732,22 @@ CALLBACK(parse_ts, bool,
 	if (streq(buf, "dynamic"))
 	{
 		ts = traffic_selector_create_dynamic(proto, from, to);
+	}
+	else if (strchr(buf, '-'))
+	{
+		host_t *lower, *upper;
+		ts_type_t type;
+
+		if (host_create_from_range(buf, &lower, &upper))
+		{
+			type = (lower->get_family(lower) == AF_INET) ?
+								TS_IPV4_ADDR_RANGE : TS_IPV6_ADDR_RANGE;
+			ts = traffic_selector_create_from_bytes(proto, type,
+								lower->get_address(lower), from,
+								upper->get_address(upper), to);
+			lower->destroy(lower);
+			upper->destroy(upper);
+		}
 	}
 	else
 	{
@@ -681,7 +793,7 @@ typedef struct {
  */
 static bool parse_map(enum_map_t *map, int count, int *out, chunk_t v)
 {
-	char buf[128];
+	char buf[BUF_LEN];
 	int i;
 
 	if (!vici_stringify(v, buf, sizeof(buf)))
@@ -729,14 +841,133 @@ CALLBACK(parse_bool, bool,
  * Parse a ipsec_mode_t
  */
 CALLBACK(parse_mode, bool,
-	ipsec_mode_t *out, chunk_t v)
+	child_cfg_create_t *cfg, chunk_t v)
 {
 	enum_map_t map[] = {
-		{ "tunnel",		MODE_TUNNEL		},
-		{ "transport",	MODE_TRANSPORT	},
-		{ "beet",		MODE_BEET		},
-		{ "drop",		MODE_DROP		},
-		{ "pass",		MODE_PASS		},
+		{ "tunnel",				MODE_TUNNEL		},
+		{ "transport",			MODE_TRANSPORT	},
+		{ "transport_proxy",	MODE_TRANSPORT	},
+		{ "beet",				MODE_BEET		},
+		{ "drop",				MODE_DROP		},
+		{ "pass",				MODE_PASS		},
+	};
+	int d;
+
+	if (parse_map(map, countof(map), &d, v))
+	{
+		cfg->mode = d;
+		if ((d == MODE_TRANSPORT) && (v.len > 9))
+		{
+			cfg->options |= OPT_PROXY_MODE;
+		}
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/**
+ * Enable a child_cfg_option_t, the flag controls whether the option is enabled
+ * if the parsed value is TRUE or FALSE.
+ */
+static bool parse_option(child_cfg_option_t *out, child_cfg_option_t opt,
+						 chunk_t v, bool add_if_true)
+{
+	bool val;
+
+	if (parse_bool(&val, v))
+	{
+		if (val == add_if_true)
+		{
+			*out |= opt;
+		}
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/**
+ * Parse OPT_HOSTACCESS option
+ */
+CALLBACK(parse_opt_haccess, bool,
+	child_cfg_option_t *out, chunk_t v)
+{
+	return parse_option(out, OPT_HOSTACCESS, v, TRUE);
+}
+
+/**
+ * Parse OPT_NO_POLICIES option
+ */
+CALLBACK(parse_opt_policies, bool,
+	child_cfg_option_t *out, chunk_t v)
+{
+	return parse_option(out, OPT_NO_POLICIES, v, FALSE);
+}
+
+/**
+ * Parse OPT_FWD_OUT_POLICIES option
+ */
+CALLBACK(parse_opt_fwd_out, bool,
+	child_cfg_option_t *out, chunk_t v)
+{
+	return parse_option(out, OPT_FWD_OUT_POLICIES, v, TRUE);
+}
+
+/**
+ * Parse OPT_IPCOMP option
+ */
+CALLBACK(parse_opt_ipcomp, bool,
+	child_cfg_option_t *out, chunk_t v)
+{
+	return parse_option(out, OPT_IPCOMP, v, TRUE);
+}
+
+/**
+ * Parse OPT_SHA256_96 option
+ */
+CALLBACK(parse_opt_sha256_96, bool,
+	child_cfg_option_t *out, chunk_t v)
+{
+	return parse_option(out, OPT_SHA256_96, v, TRUE);
+}
+
+/**
+ * Parse OPT_MARK_IN_SA option
+ */
+CALLBACK(parse_opt_mark_in, bool,
+	child_cfg_option_t *out, chunk_t v)
+{
+	return parse_option(out, OPT_MARK_IN_SA, v, TRUE);
+}
+
+/**
+ * Parse OPT_NO_COPY_DF option
+ */
+CALLBACK(parse_opt_copy_df, bool,
+	child_cfg_option_t *out, chunk_t v)
+{
+	return parse_option(out, OPT_NO_COPY_DF, v, FALSE);
+}
+
+/**
+ * Parse OPT_NO_COPY_ECN option
+ */
+CALLBACK(parse_opt_copy_ecn, bool,
+	child_cfg_option_t *out, chunk_t v)
+{
+	return parse_option(out, OPT_NO_COPY_ECN, v, FALSE);
+}
+
+/**
+ * Parse a dscp_copy_t
+ */
+CALLBACK(parse_copy_dscp, bool,
+	dscp_copy_t *out, chunk_t v)
+{
+	enum_map_t map[] = {
+		{ "no",		DSCP_COPY_NO		},
+		{ "in",		DSCP_COPY_IN_ONLY	},
+		{ "out",	DSCP_COPY_OUT_ONLY	},
+		{ "yes",	DSCP_COPY_YES		},
 	};
 	int d;
 
@@ -773,10 +1004,30 @@ CALLBACK(parse_action, bool,
 }
 
 /**
- * Parse a u_int32_t
+ * Parse an hw_offload_t
  */
-CALLBACK(parse_uint32, bool,
-	u_int32_t *out, chunk_t v)
+CALLBACK(parse_hw_offload, bool,
+	action_t *out, chunk_t v)
+{
+	enum_map_t map[] = {
+		{ "no",		HW_OFFLOAD_NO	},
+		{ "yes",	HW_OFFLOAD_YES	},
+		{ "auto",	HW_OFFLOAD_AUTO	},
+	};
+	int d;
+
+	if (parse_map(map, countof(map), &d, v))
+	{
+		*out = d;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/**
+ * Parse a uint32_t with the given base
+ */
+static bool parse_uint32_base(uint32_t *out, chunk_t v, int base)
 {
 	char buf[16], *end;
 	u_long l;
@@ -785,7 +1036,7 @@ CALLBACK(parse_uint32, bool,
 	{
 		return FALSE;
 	}
-	l = strtoul(buf, &end, 0);
+	l = strtoul(buf, &end, base);
 	if (*end == 0)
 	{
 		*out = l;
@@ -795,10 +1046,28 @@ CALLBACK(parse_uint32, bool,
 }
 
 /**
- * Parse a u_int64_t
+ * Parse a uint32_t
+ */
+CALLBACK(parse_uint32, bool,
+	uint32_t *out, chunk_t v)
+{
+	return parse_uint32_base(out, v, 0);
+}
+
+/**
+ * Parse a uint32_t in binary encoding
+ */
+CALLBACK(parse_uint32_bin, bool,
+	uint32_t *out, chunk_t v)
+{
+	return parse_uint32_base(out, v, 2);
+}
+
+/**
+ * Parse a uint64_t
  */
 CALLBACK(parse_uint64, bool,
-	u_int64_t *out, chunk_t v)
+	uint64_t *out, chunk_t v)
 {
 	char buf[16], *end;
 	unsigned long long l;
@@ -820,7 +1089,7 @@ CALLBACK(parse_uint64, bool,
  * Parse a relative time
  */
 CALLBACK(parse_time, bool,
-	u_int64_t *out, chunk_t v)
+	uint64_t *out, chunk_t v)
 {
 	char buf[16], *end;
 	u_long l;
@@ -867,10 +1136,26 @@ CALLBACK(parse_time, bool,
 }
 
 /**
+ * Parse a relative time (32-bit)
+ */
+CALLBACK(parse_time32, bool,
+	uint32_t *out, chunk_t v)
+{
+	uint64_t time;
+
+	if (parse_time(&time, v))
+	{
+		*out = time;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/**
  * Parse byte volume
  */
 CALLBACK(parse_bytes, bool,
-	u_int64_t *out, chunk_t v)
+	uint64_t *out, chunk_t v)
 {
 	char buf[16], *end;
 	unsigned long long l;
@@ -925,14 +1210,44 @@ CALLBACK(parse_mark, bool,
 	{
 		return FALSE;
 	}
-	return mark_from_string(buf, out);
+	return mark_from_string(buf, MARK_OP_UNIQUE, out);
+}
+
+/**
+ * Parse a mark_t when using it as set_mark.
+ */
+CALLBACK(parse_set_mark, bool,
+	mark_t *out, chunk_t v)
+{
+	char buf[32];
+
+	if (!vici_stringify(v, buf, sizeof(buf)))
+	{
+		return FALSE;
+	}
+	return mark_from_string(buf, MARK_OP_SAME, out);
+}
+
+/**
+ * Parse interface ID
+ */
+CALLBACK(parse_if_id, bool,
+	uint32_t *out, chunk_t v)
+{
+	char buf[32];
+
+	if (!vici_stringify(v, buf, sizeof(buf)))
+	{
+		return FALSE;
+	}
+	return if_id_from_string(buf, out);
 }
 
 /**
  * Parse TFC padding option
  */
 CALLBACK(parse_tfc, bool,
-	u_int32_t *out, chunk_t v)
+	uint32_t *out, chunk_t v)
 {
 	if (chunk_equals(v, chunk_from_str("mtu")))
 	{
@@ -940,6 +1255,20 @@ CALLBACK(parse_tfc, bool,
 		return TRUE;
 	}
 	return parse_uint32(out, v);
+}
+
+/**
+ * Parse 6-bit DSCP value
+ */
+CALLBACK(parse_dscp, bool,
+	uint8_t *out, chunk_t v)
+{
+	if (parse_uint32_bin(out, v))
+	{
+		*out = *out & 0x3f;
+		return TRUE;
+	}
+	return FALSE;
 }
 
 /**
@@ -955,13 +1284,14 @@ CALLBACK(parse_auth, bool,
 	{
 		return FALSE;
 	}
-	if (strpfx(buf, "pubkey") ||
+	if (strpfx(buf, "ike:") ||
+		strpfx(buf, "pubkey") ||
 		strpfx(buf, "rsa") ||
 		strpfx(buf, "ecdsa") ||
 		strpfx(buf, "bliss"))
 	{
 		cfg->add(cfg, AUTH_RULE_AUTH_CLASS, AUTH_CLASS_PUBKEY);
-		cfg->add_pubkey_constraints(cfg, buf);
+		cfg->add_pubkey_constraints(cfg, buf, TRUE);
 		return TRUE;
 	}
 	if (strcaseeq(buf, "psk"))
@@ -981,8 +1311,16 @@ CALLBACK(parse_auth, bool,
 	}
 	if (strcasepfx(buf, "eap"))
 	{
+		char *pos;
+
 		cfg->add(cfg, AUTH_RULE_AUTH_CLASS, AUTH_CLASS_EAP);
 
+		pos = strchr(buf, ':');
+		if (pos)
+		{
+			*pos = 0;
+			cfg->add_pubkey_constraints(cfg, pos + 1, FALSE);
+		}
 		type = eap_vendor_type_from_string(buf);
 		if (type)
 		{
@@ -1003,7 +1341,7 @@ CALLBACK(parse_auth, bool,
  */
 static bool parse_id(auth_cfg_t *cfg, auth_rule_t rule, chunk_t v)
 {
-	char buf[256];
+	char buf[BUF_LEN];
 
 	if (!vici_stringify(v, buf, sizeof(buf)))
 	{
@@ -1059,27 +1397,52 @@ CALLBACK(parse_group, bool,
 }
 
 /**
+ * Parse certificate policy
+ */
+CALLBACK(parse_cert_policy, bool,
+	auth_cfg_t *cfg, chunk_t v)
+{
+	char buf[BUF_LEN];
+
+	if (!vici_stringify(v, buf, sizeof(buf)))
+	{
+		return FALSE;
+	}
+	cfg->add(cfg, AUTH_RULE_CERT_POLICY, strdup(buf));
+	return TRUE;
+}
+
+/**
+ * Add a certificate as auth rule to config
+ */
+static bool add_cert(auth_data_t *auth, auth_rule_t rule, certificate_t *cert)
+{
+	vici_authority_t *authority;
+	vici_cred_t *cred;
+
+	if (rule == AUTH_RULE_SUBJECT_CERT)
+	{
+		authority = auth->request->this->authority;
+		authority->check_for_hash_and_url(authority, cert);
+	}
+	cred = auth->request->this->cred;
+	cert = cred->add_cert(cred, cert);
+	auth->cfg->add(auth->cfg, rule, cert);
+	return TRUE;
+}
+
+/**
  * Parse a certificate; add as auth rule to config
  */
 static bool parse_cert(auth_data_t *auth, auth_rule_t rule, chunk_t v)
 {
-	vici_authority_t *authority;
-	vici_cred_t *cred;
 	certificate_t *cert;
 
 	cert = lib->creds->create(lib->creds, CRED_CERTIFICATE, CERT_X509,
 							  BUILD_BLOB_PEM, v, BUILD_END);
 	if (cert)
 	{
-		if (rule == AUTH_RULE_SUBJECT_CERT)
-		{
-			authority = auth->request->this->authority;
-			authority->check_for_hash_and_url(authority, cert);
-		}
-		cred = auth->request->this->cred;
-		cert = cred->add_cert(cred, cert);
-		auth->cfg->add(auth->cfg, rule, cert);
-		return TRUE;
+		return add_cert(auth, rule, cert);
 	}
 	return FALSE;
 }
@@ -1186,8 +1549,30 @@ CALLBACK(parse_frag, bool,
 {
 	enum_map_t map[] = {
 		{ "yes",		FRAGMENTATION_YES		},
+		{ "accept",		FRAGMENTATION_ACCEPT	},
 		{ "no",			FRAGMENTATION_NO		},
 		{ "force",		FRAGMENTATION_FORCE		},
+	};
+	int d;
+
+	if (parse_map(map, countof(map), &d, v))
+	{
+		*out = d;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/**
+ * Parse a childless_t
+ */
+CALLBACK(parse_childless, bool,
+	childless_t *out, chunk_t v)
+{
+	enum_map_t map[] = {
+		{ "allow",		CHILDLESS_ALLOW		},
+		{ "never",		CHILDLESS_NEVER		},
+		{ "force",		CHILDLESS_FORCE		},
 	};
 	int d;
 
@@ -1264,6 +1649,37 @@ CALLBACK(parse_hosts, bool,
 	return TRUE;
 }
 
+/**
+ * Parse peer/ppk ID
+ */
+CALLBACK(parse_peer_id, bool,
+	identification_t **out, chunk_t v)
+{
+	char buf[BUF_LEN];
+
+	if (!vici_stringify(v, buf, sizeof(buf)))
+	{
+		return FALSE;
+	}
+	*out = identification_create_from_string(buf);
+	return TRUE;
+}
+
+
+CALLBACK(cert_kv, bool,
+	cert_data_t *cert, vici_message_t *message, char *name, chunk_t value)
+{
+	parse_rule_t rules[] = {
+		{ "handle",			parse_string,		&cert->handle				},
+		{ "slot",			parse_uint32,		&cert->slot					},
+		{ "module",			parse_string,		&cert->module				},
+		{ "file",			parse_string,		&cert->file					},
+	};
+
+	return parse_rules(rules, countof(rules), name, value,
+					   &cert->request->reply);
+}
+
 CALLBACK(child_li, bool,
 	child_data_t *child, vici_message_t *message, char *name, chunk_t value)
 {
@@ -1282,29 +1698,42 @@ CALLBACK(child_kv, bool,
 	child_data_t *child, vici_message_t *message, char *name, chunk_t value)
 {
 	parse_rule_t rules[] = {
-		{ "updown",			parse_string,		&child->updown				},
-		{ "hostaccess",		parse_bool,			&child->hostaccess			},
-		{ "mode",			parse_mode,			&child->mode				},
-		{ "policies",		parse_bool,			&child->policies			},
-		{ "replay_window",	parse_uint32,		&child->replay_window		},
-		{ "rekey_time",		parse_time,			&child->lft.time.rekey		},
-		{ "life_time",		parse_time,			&child->lft.time.life		},
-		{ "rand_time",		parse_time,			&child->lft.time.jitter		},
-		{ "rekey_bytes",	parse_bytes,		&child->lft.bytes.rekey		},
-		{ "life_bytes",		parse_bytes,		&child->lft.bytes.life		},
-		{ "rand_bytes",		parse_bytes,		&child->lft.bytes.jitter	},
-		{ "rekey_packets",	parse_uint64,		&child->lft.packets.rekey	},
-		{ "life_packets",	parse_uint64,		&child->lft.packets.life	},
-		{ "rand_packets",	parse_uint64,		&child->lft.packets.jitter	},
-		{ "dpd_action",		parse_action,		&child->dpd_action			},
-		{ "start_action",	parse_action,		&child->start_action		},
-		{ "close_action",	parse_action,		&child->close_action		},
-		{ "ipcomp",			parse_bool,			&child->ipcomp				},
-		{ "inactivity",		parse_time,			&child->inactivity			},
-		{ "reqid",			parse_uint32,		&child->reqid				},
-		{ "mark_in",		parse_mark,			&child->mark_in				},
-		{ "mark_out",		parse_mark,			&child->mark_out			},
-		{ "tfc_padding",	parse_tfc,			&child->tfc					},
+		{ "updown",				parse_string,		&child->cfg.updown					},
+		{ "hostaccess",			parse_opt_haccess,	&child->cfg.options					},
+		{ "mode",				parse_mode,			&child->cfg							},
+		{ "policies",			parse_opt_policies,	&child->cfg.options					},
+		{ "policies_fwd_out",	parse_opt_fwd_out,	&child->cfg.options					},
+		{ "replay_window",		parse_uint32,		&child->replay_window				},
+		{ "rekey_time",			parse_time,			&child->cfg.lifetime.time.rekey		},
+		{ "life_time",			parse_time,			&child->cfg.lifetime.time.life		},
+		{ "rand_time",			parse_time,			&child->cfg.lifetime.time.jitter	},
+		{ "rekey_bytes",		parse_bytes,		&child->cfg.lifetime.bytes.rekey	},
+		{ "life_bytes",			parse_bytes,		&child->cfg.lifetime.bytes.life		},
+		{ "rand_bytes",			parse_bytes,		&child->cfg.lifetime.bytes.jitter	},
+		{ "rekey_packets",		parse_uint64,		&child->cfg.lifetime.packets.rekey	},
+		{ "life_packets",		parse_uint64,		&child->cfg.lifetime.packets.life	},
+		{ "rand_packets",		parse_uint64,		&child->cfg.lifetime.packets.jitter	},
+		{ "dpd_action",			parse_action,		&child->cfg.dpd_action				},
+		{ "start_action",		parse_action,		&child->cfg.start_action			},
+		{ "close_action",		parse_action,		&child->cfg.close_action			},
+		{ "ipcomp",				parse_opt_ipcomp,	&child->cfg.options					},
+		{ "inactivity",			parse_time32,		&child->cfg.inactivity				},
+		{ "reqid",				parse_uint32,		&child->cfg.reqid					},
+		{ "mark_in",			parse_mark,			&child->cfg.mark_in					},
+		{ "mark_in_sa",			parse_opt_mark_in,	&child->cfg.options					},
+		{ "mark_out",			parse_mark,			&child->cfg.mark_out				},
+		{ "set_mark_in",		parse_set_mark,		&child->cfg.set_mark_in				},
+		{ "set_mark_out",		parse_set_mark,		&child->cfg.set_mark_out			},
+		{ "tfc_padding",		parse_tfc,			&child->cfg.tfc						},
+		{ "priority",			parse_uint32,		&child->cfg.priority				},
+		{ "interface",			parse_string,		&child->cfg.interface				},
+		{ "hw_offload",			parse_hw_offload,	&child->cfg.hw_offload				},
+		{ "sha256_96",			parse_opt_sha256_96,&child->cfg.options					},
+		{ "copy_df",			parse_opt_copy_df,	&child->cfg.options					},
+		{ "copy_ecn",			parse_opt_copy_ecn,	&child->cfg.options					},
+		{ "copy_dscp",			parse_copy_dscp,	&child->cfg.copy_dscp				},
+		{ "if_id_in",			parse_if_id,		&child->cfg.if_id_in				},
+		{ "if_id_out",			parse_if_id,		&child->cfg.if_id_out				},
 	};
 
 	return parse_rules(rules, countof(rules), name, value,
@@ -1316,6 +1745,7 @@ CALLBACK(auth_li, bool,
 {
 	parse_rule_t rules[] = {
 		{ "groups",			parse_group,		auth->cfg					},
+		{ "cert_policy",	parse_cert_policy,	auth->cfg					},
 		{ "certs",			parse_certs,		auth						},
 		{ "cacerts",		parse_cacerts,		auth						},
 		{ "pubkeys",		parse_pubkeys,		auth						},
@@ -1335,6 +1765,7 @@ CALLBACK(auth_kv, bool,
 		{ "eap_id",			parse_eap_id,		auth->cfg					},
 		{ "xauth_id",		parse_xauth_id,		auth->cfg					},
 		{ "revocation",		parse_revocation,	auth->cfg					},
+		{ "round",			parse_uint32,		&auth->round				},
 	};
 
 	return parse_rules(rules, countof(rules), name, value,
@@ -1363,11 +1794,13 @@ CALLBACK(peer_kv, bool,
 		{ "version",		parse_uint32,		&peer->version				},
 		{ "aggressive",		parse_bool,			&peer->aggressive			},
 		{ "pull",			parse_bool,			&peer->pull					},
+		{ "dscp",			parse_dscp,			&peer->dscp					},
 		{ "encap",			parse_bool,			&peer->encap				},
 		{ "mobike",			parse_bool,			&peer->mobike				},
 		{ "dpd_delay",		parse_time,			&peer->dpd_delay			},
 		{ "dpd_timeout",	parse_time,			&peer->dpd_timeout			},
 		{ "fragmentation",	parse_frag,			&peer->fragmentation		},
+		{ "childless",		parse_childless,	&peer->childless			},
 		{ "send_certreq",	parse_bool,			&peer->send_certreq			},
 		{ "send_cert",		parse_send_cert,	&peer->send_cert			},
 		{ "keyingtries",	parse_uint32,		&peer->keyingtries			},
@@ -1378,10 +1811,132 @@ CALLBACK(peer_kv, bool,
 		{ "rekey_time",		parse_time,			&peer->rekey_time			},
 		{ "over_time",		parse_time,			&peer->over_time			},
 		{ "rand_time",		parse_time,			&peer->rand_time			},
+		{ "ppk_id",			parse_peer_id,		&peer->ppk_id				},
+		{ "ppk_required",	parse_bool,			&peer->ppk_required			},
+		{ "if_id_in",		parse_if_id,		&peer->if_id_in				},
+		{ "if_id_out",		parse_if_id,		&peer->if_id_out			},
+#ifdef ME
+		{ "mediation",		parse_bool,			&peer->mediation			},
+		{ "mediated_by",	parse_string,		&peer->mediated_by			},
+		{ "mediation_peer",	parse_peer_id,		&peer->peer_id				},
+#endif /* ME */
 	};
 
 	return parse_rules(rules, countof(rules), name, value,
 					   &peer->request->reply);
+}
+
+CALLBACK(auth_sn, bool,
+	auth_data_t *auth, vici_message_t *message, vici_parse_context_t *ctx,
+	char *name)
+{
+	if (strcasepfx(name, "cert") ||
+		strcasepfx(name, "cacert"))
+	{
+		cert_data_t *data;
+		auth_rule_t rule;
+		certificate_t *cert;
+		chunk_t handle;
+
+		INIT(data,
+			.request = auth->request,
+			.slot = -1,
+		);
+
+		if (!message->parse(message, ctx, NULL, cert_kv, NULL, data))
+		{
+			free_cert_data(data);
+			return FALSE;
+		}
+		if  (!data->handle && !data->file)
+		{
+			auth->request->reply = create_reply("handle or file path missing: "
+												"%s", name);
+			free_cert_data(data);
+			return FALSE;
+		}
+		else if (data->handle && data->file)
+		{
+			auth->request->reply = create_reply("handle and file path given: "
+												"%s", name);
+			free_cert_data(data);
+			return FALSE;
+		}
+
+		if (data->file)
+		{
+			cert = lib->creds->create(lib->creds, CRED_CERTIFICATE, CERT_X509,
+								BUILD_FROM_FILE, data->file, BUILD_END);
+		}
+		else
+		{
+			handle = chunk_from_hex(chunk_from_str(data->handle), NULL);
+			if (data->slot != -1)
+			{
+				cert = lib->creds->create(lib->creds, CRED_CERTIFICATE,
+								CERT_X509, BUILD_PKCS11_KEYID, handle,
+								BUILD_PKCS11_SLOT, data->slot,
+								data->module ? BUILD_PKCS11_MODULE : BUILD_END,
+								data->module, BUILD_END);
+			}
+			else
+			{
+				cert = lib->creds->create(lib->creds, CRED_CERTIFICATE,
+								CERT_X509, BUILD_PKCS11_KEYID, handle,
+								data->module ? BUILD_PKCS11_MODULE : BUILD_END,
+								data->module, BUILD_END);
+			}
+			chunk_free(&handle);
+		}
+		free_cert_data(data);
+		if (!cert)
+		{
+			auth->request->reply = create_reply("unable to load certificate: "
+												"%s", name);
+			return FALSE;
+		}
+		rule = strcasepfx(name, "cert") ? AUTH_RULE_SUBJECT_CERT
+										: AUTH_RULE_CA_CERT;
+		return add_cert(auth, rule, cert);
+	}
+	auth->request->reply = create_reply("invalid section: %s", name);
+	return FALSE;
+}
+
+/**
+ * Check and update lifetimes
+ */
+static void check_lifetimes(lifetime_cfg_t *lft)
+{
+	/* if no hard lifetime specified, add one at soft lifetime + 10% */
+	if (lft->time.life == LFT_UNDEFINED)
+	{
+		lft->time.life = lft->time.rekey * 110 / 100;
+	}
+	if (lft->bytes.life == LFT_UNDEFINED)
+	{
+		lft->bytes.life = lft->bytes.rekey * 110 / 100;
+	}
+	if (lft->packets.life == LFT_UNDEFINED)
+	{
+		lft->packets.life = lft->packets.rekey * 110 / 100;
+	}
+	/* if no rand time defined, use difference of hard and soft */
+	if (lft->time.jitter == LFT_UNDEFINED)
+	{
+		lft->time.jitter = lft->time.life -
+									min(lft->time.life, lft->time.rekey);
+	}
+	if (lft->bytes.jitter == LFT_UNDEFINED)
+	{
+		lft->bytes.jitter = lft->bytes.life -
+									min(lft->bytes.life, lft->bytes.rekey);
+	}
+	if (lft->packets.jitter == LFT_UNDEFINED)
+	{
+		lft->packets.jitter = lft->packets.life -
+									min(lft->packets.life, lft->packets.rekey);
+	}
 }
 
 CALLBACK(children_sn, bool,
@@ -1393,29 +1948,27 @@ CALLBACK(children_sn, bool,
 		.proposals = linked_list_create(),
 		.local_ts = linked_list_create(),
 		.remote_ts = linked_list_create(),
-		.mode = MODE_TUNNEL,
-		.policies = TRUE,
 		.replay_window = REPLAY_UNDEFINED,
-		.dpd_action = ACTION_NONE,
-		.start_action = ACTION_NONE,
-		.close_action = ACTION_NONE,
-		.lft = {
-			.time = {
-				.rekey = LFT_DEFAULT_CHILD_REKEY,
-				.life = LFT_UNDEFINED,
-				.jitter = LFT_UNDEFINED,
+		.cfg = {
+			.mode = MODE_TUNNEL,
+			.lifetime = {
+				.time = {
+					.rekey = LFT_DEFAULT_CHILD_REKEY_TIME,
+					.life = LFT_UNDEFINED,
+					.jitter = LFT_UNDEFINED,
+				},
+				.bytes = {
+					.rekey = LFT_DEFAULT_CHILD_REKEY_BYTES,
+					.life = LFT_UNDEFINED,
+					.jitter = LFT_UNDEFINED,
+				},
+				.packets = {
+					.rekey = LFT_DEFAULT_CHILD_REKEY_PACKETS,
+					.life = LFT_UNDEFINED,
+					.jitter = LFT_UNDEFINED,
+				},
 			},
-			.bytes = {
-				.rekey = LFT_UNDEFINED,
-				.life = LFT_UNDEFINED,
-				.jitter = LFT_UNDEFINED,
-			},
-			.packets = {
-				.rekey = LFT_UNDEFINED,
-				.life = LFT_UNDEFINED,
-				.jitter = LFT_UNDEFINED,
-			},
-		}
+		},
 	};
 	child_cfg_t *cfg;
 	proposal_t *proposal;
@@ -1451,54 +2004,11 @@ CALLBACK(children_sn, bool,
 		}
 	}
 
-	/* if no hard lifetime specified, add one at soft lifetime + 10% */
-	if (child.lft.time.life == LFT_UNDEFINED)
-	{
-		child.lft.time.life = child.lft.time.rekey * 110 / 100;
-	}
-	if (child.lft.bytes.life == LFT_UNDEFINED)
-	{
-		child.lft.bytes.life = child.lft.bytes.rekey * 110 / 100;
-	}
-	if (child.lft.packets.life == LFT_UNDEFINED)
-	{
-		child.lft.packets.life = child.lft.packets.rekey * 110 / 100;
-	}
-	/* if no soft lifetime specified, add one at hard lifetime - 10% */
-	if (child.lft.bytes.rekey == LFT_UNDEFINED)
-	{
-		child.lft.bytes.rekey = child.lft.bytes.life * 90 / 100;
-	}
-	if (child.lft.packets.rekey == LFT_UNDEFINED)
-	{
-		child.lft.packets.rekey = child.lft.packets.life * 90 / 100;
-	}
-	/* if no rand time defined, use difference of hard and soft */
-	if (child.lft.time.jitter == LFT_UNDEFINED)
-	{
-		child.lft.time.jitter = child.lft.time.life -
-						min(child.lft.time.life, child.lft.time.rekey);
-	}
-	if (child.lft.bytes.jitter == LFT_UNDEFINED)
-	{
-		child.lft.bytes.jitter = child.lft.bytes.life -
-						min(child.lft.bytes.life, child.lft.bytes.rekey);
-	}
-	if (child.lft.packets.jitter == LFT_UNDEFINED)
-	{
-		child.lft.packets.jitter = child.lft.packets.life -
-						min(child.lft.packets.life, child.lft.packets.rekey);
-	}
+	check_lifetimes(&child.cfg.lifetime);
 
 	log_child_data(&child, name);
 
-	cfg = child_cfg_create(name, &child.lft, child.updown,
-						child.hostaccess, child.mode, child.start_action,
-						child.dpd_action, child.close_action, child.ipcomp,
-						child.inactivity, child.reqid, &child.mark_in,
-						&child.mark_out, child.tfc);
-
-	cfg->set_mipv6_options(cfg, FALSE, child.policies);
+	cfg = child_cfg_create(name, &child.cfg);
 
 	if (child.replay_window != REPLAY_UNDEFINED)
 	{
@@ -1538,25 +2048,28 @@ CALLBACK(peer_sn, bool,
 	if (strcasepfx(name, "local") ||
 		strcasepfx(name, "remote"))
 	{
-		auth_data_t auth = {
-			.request = peer->request,
-			.cfg = auth_cfg_create(),
-		};
+		enumerator_t *enumerator;
+		linked_list_t *auths;
+		auth_data_t *auth, *current;
 		auth_rule_t rule;
 		certificate_t *cert;
 		pubkey_cert_t *pubkey_cert;
 		identification_t *id;
-		enumerator_t *enumerator;
 		bool default_id = FALSE;
 
-		if (!message->parse(message, ctx, NULL, auth_kv, auth_li, &auth))
+		INIT(auth,
+			.request = peer->request,
+			.cfg = auth_cfg_create(),
+		);
+
+		if (!message->parse(message, ctx, auth_sn, auth_kv, auth_li, auth))
 		{
-			auth.cfg->destroy(auth.cfg);
+			free_auth_data(auth);
 			return FALSE;
 		}
-		id   = auth.cfg->get(auth.cfg, AUTH_RULE_IDENTITY);
+		id = auth->cfg->get(auth->cfg, AUTH_RULE_IDENTITY);
 
-		enumerator = auth.cfg->create_enumerator(auth.cfg);
+		enumerator = auth->cfg->create_enumerator(auth->cfg);
 		while (enumerator->enumerate(enumerator, &rule, &cert))
 		{
 			if (rule == AUTH_RULE_SUBJECT_CERT && !default_id)
@@ -1566,7 +2079,7 @@ CALLBACK(peer_sn, bool,
 					id = cert->get_subject(cert);
 					DBG1(DBG_CFG, "  id not specified, defaulting to"
 								  " cert subject '%Y'", id);
-					auth.cfg->add(auth.cfg, AUTH_RULE_IDENTITY, id->clone(id));
+					auth->cfg->add(auth->cfg, AUTH_RULE_IDENTITY, id->clone(id));
 					default_id = TRUE;
 				}
 				else if (cert->get_type(cert) == CERT_TRUSTED_PUBKEY &&
@@ -1580,14 +2093,17 @@ CALLBACK(peer_sn, bool,
 		}
 		enumerator->destroy(enumerator);
 
-		if (strcasepfx(name, "local"))
+		auths = strcasepfx(name, "local") ? peer->local : peer->remote;
+		enumerator = auths->create_enumerator(auths);
+		while (enumerator->enumerate(enumerator, &current))
 		{
-			peer->local->insert_last(peer->local, auth.cfg);
+			if (auth->round < current->round)
+			{
+				break;
+			}
 		}
-		else
-		{
-			peer->remote->insert_last(peer->remote, auth.cfg);
-		}
+		auths->insert_before(auths, enumerator, auth);
+		enumerator->destroy(enumerator);
 		return TRUE;
 	}
 	peer->request->reply = create_reply("invalid section: %s", name);
@@ -1595,42 +2111,7 @@ CALLBACK(peer_sn, bool,
 }
 
 /**
- * Find reqid of an existing CHILD_SA
- */
-static u_int32_t find_reqid(child_cfg_t *cfg)
-{
-	enumerator_t *enumerator, *children;
-	child_sa_t *child_sa;
-	ike_sa_t *ike_sa;
-	u_int32_t reqid;
-
-	reqid = charon->traps->find_reqid(charon->traps, cfg);
-	if (reqid)
-	{	/* already trapped */
-		return reqid;
-	}
-
-	enumerator = charon->controller->create_ike_sa_enumerator(
-													charon->controller, TRUE);
-	while (!reqid && enumerator->enumerate(enumerator, &ike_sa))
-	{
-		children = ike_sa->create_child_sa_enumerator(ike_sa);
-		while (children->enumerate(children, &child_sa))
-		{
-			if (streq(cfg->get_name(cfg), child_sa->get_name(child_sa)))
-			{
-				reqid = child_sa->get_reqid(child_sa);
-				break;
-			}
-		}
-		children->destroy(children);
-	}
-	enumerator->destroy(enumerator);
-	return reqid;
-}
-
-/**
- * Perform start actions associated to a child config
+ * Perform start actions associated with a child config
  */
 static void run_start_action(private_vici_config_t *this, peer_cfg_t *peer_cfg,
 							 child_cfg_t *child_cfg)
@@ -1649,11 +2130,11 @@ static void run_start_action(private_vici_config_t *this, peer_cfg_t *peer_cfg,
 			{
 				case MODE_PASS:
 				case MODE_DROP:
-					charon->shunts->install(charon->shunts, child_cfg);
+					charon->shunts->install(charon->shunts,
+									peer_cfg->get_name(peer_cfg), child_cfg);
 					break;
 				default:
-					charon->traps->install(charon->traps, peer_cfg, child_cfg,
-										   find_reqid(child_cfg));
+					charon->traps->install(charon->traps, peer_cfg, child_cfg);
 					break;
 			}
 			break;
@@ -1663,7 +2144,7 @@ static void run_start_action(private_vici_config_t *this, peer_cfg_t *peer_cfg,
 }
 
 /**
- * Undo start actions associated to a child config
+ * Undo start actions associated with a child config
  */
 static void clear_start_action(private_vici_config_t *this, char *peer_name,
 							   child_cfg_t *child_cfg)
@@ -1671,11 +2152,12 @@ static void clear_start_action(private_vici_config_t *this, char *peer_name,
 	enumerator_t *enumerator, *children;
 	child_sa_t *child_sa;
 	ike_sa_t *ike_sa;
-	u_int32_t id = 0, others;
+	uint32_t id = 0, others;
 	array_t *ids = NULL, *ikeids = NULL;
 	char *name;
 
 	name = child_cfg->get_name(child_cfg);
+
 	switch (child_cfg->get_start_action(child_cfg))
 	{
 		case ACTION_RESTART:
@@ -1691,7 +2173,8 @@ static void clear_start_action(private_vici_config_t *this, char *peer_name,
 				children = ike_sa->create_child_sa_enumerator(ike_sa);
 				while (children->enumerate(children, &child_sa))
 				{
-					if (child_sa->get_state(child_sa) != CHILD_DELETING)
+					if (child_sa->get_state(child_sa) != CHILD_DELETING &&
+						child_sa->get_state(child_sa) != CHILD_DELETED)
 					{
 						if (streq(name, child_sa->get_name(child_sa)))
 						{
@@ -1744,8 +2227,8 @@ static void clear_start_action(private_vici_config_t *this, char *peer_name,
 				while (array_remove(ikeids, ARRAY_HEAD, &id))
 				{
 					DBG1(DBG_CFG, "closing IKE_SA #%u", id);
-					charon->controller->terminate_ike(charon->controller,
-													  id, NULL, NULL, 0);
+					charon->controller->terminate_ike(charon->controller, id,
+													  FALSE, NULL, NULL, 0);
 				}
 				array_destroy(ikeids);
 			}
@@ -1756,23 +2239,10 @@ static void clear_start_action(private_vici_config_t *this, char *peer_name,
 			{
 				case MODE_PASS:
 				case MODE_DROP:
-					charon->shunts->uninstall(charon->shunts, name);
+					charon->shunts->uninstall(charon->shunts, peer_name, name);
 					break;
 				default:
-					enumerator = charon->traps->create_enumerator(charon->traps);
-					while (enumerator->enumerate(enumerator, NULL, &child_sa))
-					{
-						if (streq(name, child_sa->get_name(child_sa)))
-						{
-							id = child_sa->get_reqid(child_sa);
-							break;
-						}
-					}
-					enumerator->destroy(enumerator);
-					if (id)
-					{
-						charon->traps->uninstall(charon->traps, id);
-					}
+					charon->traps->uninstall(charon->traps, peer_name, name);
 					break;
 			}
 			break;
@@ -1782,36 +2252,56 @@ static void clear_start_action(private_vici_config_t *this, char *peer_name,
 }
 
 /**
- * Run start actions associated to all child configs of a peer config
+ * Run or undo a start actions associated with a child config
  */
-static void run_start_actions(private_vici_config_t *this, peer_cfg_t *peer_cfg)
+static void handle_start_action(private_vici_config_t *this,
+								peer_cfg_t *peer_cfg, child_cfg_t *child_cfg,
+								bool undo)
 {
-	enumerator_t *enumerator;
-	child_cfg_t *child_cfg;
+	this->handling_actions = TRUE;
+	this->lock->unlock(this->lock);
 
-	enumerator = peer_cfg->create_child_cfg_enumerator(peer_cfg);
-	while (enumerator->enumerate(enumerator, &child_cfg))
-	{
-		run_start_action(this, peer_cfg, child_cfg);
-	}
-	enumerator->destroy(enumerator);
-}
-
-/**
- * Undo start actions associated to all child configs of a peer config
- */
-static void clear_start_actions(private_vici_config_t *this,
-								peer_cfg_t *peer_cfg)
-{
-	enumerator_t *enumerator;
-	child_cfg_t *child_cfg;
-
-	enumerator = peer_cfg->create_child_cfg_enumerator(peer_cfg);
-	while (enumerator->enumerate(enumerator, &child_cfg))
+	if (undo)
 	{
 		clear_start_action(this, peer_cfg->get_name(peer_cfg), child_cfg);
 	}
+	else
+	{
+		run_start_action(this, peer_cfg, child_cfg);
+	}
+
+	this->lock->write_lock(this->lock);
+	this->handling_actions = FALSE;
+}
+
+/**
+ * Run or undo start actions associated with all child configs of a peer config
+ */
+static void handle_start_actions(private_vici_config_t *this,
+								 peer_cfg_t *peer_cfg, bool undo)
+{
+	enumerator_t *enumerator;
+	child_cfg_t *child_cfg;
+
+	this->handling_actions = TRUE;
+	this->lock->unlock(this->lock);
+
+	enumerator = peer_cfg->create_child_cfg_enumerator(peer_cfg);
+	while (enumerator->enumerate(enumerator, &child_cfg))
+	{
+		if (undo)
+		{
+			clear_start_action(this, peer_cfg->get_name(peer_cfg), child_cfg);
+		}
+		else
+		{
+			run_start_action(this, peer_cfg, child_cfg);
+		}
+	}
 	enumerator->destroy(enumerator);
+
+	this->lock->write_lock(this->lock);
+	this->handling_actions = FALSE;
 }
 
 /**
@@ -1822,22 +2312,12 @@ static void replace_children(private_vici_config_t *this,
 {
 	enumerator_t *enumerator;
 	child_cfg_t *child;
+	bool added;
 
-	enumerator = to->create_child_cfg_enumerator(to);
-	while (enumerator->enumerate(enumerator, &child))
+	enumerator = to->replace_child_cfgs(to, from);
+	while (enumerator->enumerate(enumerator, &child, &added))
 	{
-		to->remove_child_cfg(to, enumerator);
-		clear_start_action(this, to->get_name(to), child);
-		child->destroy(child);
-	}
-	enumerator->destroy(enumerator);
-
-	enumerator = from->create_child_cfg_enumerator(from);
-	while (enumerator->enumerate(enumerator, &child))
-	{
-		from->remove_child_cfg(from, enumerator);
-		to->add_child_cfg(to, child);
-		run_start_action(this, to, child);
+		handle_start_action(this, to, child, !added);
 	}
 	enumerator->destroy(enumerator);
 }
@@ -1853,6 +2333,10 @@ static void merge_config(private_vici_config_t *this, peer_cfg_t *peer_cfg)
 	bool merged = FALSE;
 
 	this->lock->write_lock(this->lock);
+	while (this->handling_actions)
+	{
+		this->condvar->wait(this->condvar, this->lock);
+	}
 
 	enumerator = this->conns->create_enumerator(this->conns);
 	while (enumerator->enumerate(enumerator, &current))
@@ -1872,11 +2356,11 @@ static void merge_config(private_vici_config_t *this, peer_cfg_t *peer_cfg)
 			{
 				DBG1(DBG_CFG, "replaced vici connection: %s",
 					 peer_cfg->get_name(peer_cfg));
+				this->conns->insert_before(this->conns, enumerator, peer_cfg);
 				this->conns->remove_at(this->conns, enumerator);
-				clear_start_actions(this, current);
+				handle_start_actions(this, current, TRUE);
+				handle_start_actions(this, peer_cfg, FALSE);
 				current->destroy(current);
-				this->conns->insert_last(this->conns, peer_cfg);
-				run_start_actions(this, peer_cfg);
 			}
 			merged = TRUE;
 			break;
@@ -1888,9 +2372,9 @@ static void merge_config(private_vici_config_t *this, peer_cfg_t *peer_cfg)
 	{
 		DBG1(DBG_CFG, "added vici connection: %s", peer_cfg->get_name(peer_cfg));
 		this->conns->insert_last(this->conns, peer_cfg);
-		run_start_actions(this, peer_cfg);
+		handle_start_actions(this, peer_cfg, FALSE);
 	}
-
+	this->condvar->signal(this->condvar);
 	this->lock->unlock(this->lock);
 }
 
@@ -1911,7 +2395,7 @@ CALLBACK(config_sn, bool,
 		.send_cert = CERT_SEND_IF_ASKED,
 		.version = IKE_ANY,
 		.remote_port = IKEV2_UDP_PORT,
-		.fragmentation = FRAGMENTATION_NO,
+		.fragmentation = FRAGMENTATION_YES,
 		.unique = UNIQUE_NO,
 		.keyingtries = 1,
 		.rekey_time = LFT_UNDEFINED,
@@ -1920,10 +2404,12 @@ CALLBACK(config_sn, bool,
 		.rand_time = LFT_UNDEFINED,
 	};
 	enumerator_t *enumerator;
+	peer_cfg_create_t cfg;
 	peer_cfg_t *peer_cfg;
+	ike_cfg_create_t ike;
 	ike_cfg_t *ike_cfg;
 	child_cfg_t *child_cfg;
-	auth_cfg_t *auth_cfg;
+	auth_data_t *auth;
 	proposal_t *proposal;
 	host_t *host;
 	char *str;
@@ -1938,13 +2424,17 @@ CALLBACK(config_sn, bool,
 
 	if (peer.local->get_count(peer.local) == 0)
 	{
-		auth_cfg = auth_cfg_create();
-		peer.local->insert_last(peer.local, auth_cfg);
+		INIT(auth,
+			.cfg = auth_cfg_create(),
+		);
+		peer.local->insert_last(peer.local, auth);
 	}
 	if (peer.remote->get_count(peer.remote) == 0)
 	{
-		auth_cfg = auth_cfg_create();
-		peer.remote->insert_last(peer.remote, auth_cfg);
+		INIT(auth,
+			.cfg = auth_cfg_create(),
+		);
+		peer.remote->insert_last(peer.remote, auth);
 	}
 	if (peer.proposals->get_count(peer.proposals) == 0)
 	{
@@ -1975,7 +2465,7 @@ CALLBACK(config_sn, bool,
 	if (peer.rekey_time == LFT_UNDEFINED && peer.reauth_time == LFT_UNDEFINED)
 	{
 		/* apply a default rekey time if no rekey/reauth time set */
-		peer.rekey_time = LFT_DEFAULT_IKE_REKEY;
+		peer.rekey_time = LFT_DEFAULT_IKE_REKEY_TIME;
 		peer.reauth_time = 0;
 	}
 	if (peer.rekey_time == LFT_UNDEFINED)
@@ -2006,28 +2496,102 @@ CALLBACK(config_sn, bool,
 		peer.rand_time = min(peer.over_time, peer.rand_time / 2);
 	}
 
+#ifdef ME
+	if (peer.mediation && peer.mediated_by)
+	{
+		DBG1(DBG_CFG, "a mediation connection cannot be a mediated connection "
+			 "at the same time, config discarded");
+		free_peer_data(&peer);
+		return FALSE;
+	}
+	if (peer.mediation)
+	{	/* force unique connections for mediation connections */
+		peer.unique = UNIQUE_REPLACE;
+	}
+	else if (peer.mediated_by)
+	{	/* fallback to remote identity of first auth round if peer_id is not
+		 * given explicitly */
+		auth_cfg_t *cfg;
+
+		if (!peer.peer_id &&
+			peer.remote->get_first(peer.remote, (void**)&cfg) == SUCCESS)
+		{
+			peer.peer_id = cfg->get(cfg, AUTH_RULE_IDENTITY);
+			if (peer.peer_id)
+			{
+				peer.peer_id = peer.peer_id->clone(peer.peer_id);
+			}
+			else
+			{
+				DBG1(DBG_CFG, "mediation peer missing for mediated connection, "
+					 "config discarded");
+				free_peer_data(&peer);
+				return FALSE;
+			}
+		}
+	}
+#endif /* ME */
+
 	log_peer_data(&peer);
 
-	ike_cfg = ike_cfg_create(peer.version, peer.send_certreq, peer.encap,
-						peer.local_addrs, peer.local_port,
-						peer.remote_addrs, peer.remote_port,
-						peer.fragmentation, 0);
-	peer_cfg = peer_cfg_create(name, ike_cfg, peer.send_cert, peer.unique,
-						peer.keyingtries, peer.rekey_time, peer.reauth_time,
-						peer.rand_time, peer.over_time, peer.mobike,
-						peer.aggressive, peer.pull,
-						peer.dpd_delay, peer.dpd_timeout,
-						FALSE, NULL, NULL);
+	ike = (ike_cfg_create_t){
+		.version = peer.version,
+		.local = peer.local_addrs,
+		.local_port = peer.local_port,
+		.remote = peer.remote_addrs,
+		.remote_port = peer.remote_port,
+		.no_certreq = !peer.send_certreq,
+		.force_encap = peer.encap,
+		.fragmentation = peer.fragmentation,
+		.childless = peer.childless,
+		.dscp = peer.dscp,
+	};
+	ike_cfg = ike_cfg_create(&ike);
+
+	cfg = (peer_cfg_create_t){
+		.cert_policy = peer.send_cert,
+		.unique = peer.unique,
+		.keyingtries = peer.keyingtries,
+		.rekey_time = peer.rekey_time,
+		.reauth_time = peer.reauth_time,
+		.jitter_time = peer.rand_time,
+		.over_time = peer.over_time,
+		.no_mobike = !peer.mobike,
+		.aggressive = peer.aggressive,
+		.push_mode = !peer.pull,
+		.dpd = peer.dpd_delay,
+		.dpd_timeout = peer.dpd_timeout,
+		.ppk_id = peer.ppk_id ? peer.ppk_id->clone(peer.ppk_id) : NULL,
+		.ppk_required = peer.ppk_required,
+		.if_id_in = peer.if_id_in,
+		.if_id_out = peer.if_id_out,
+	};
+#ifdef ME
+	cfg.mediation = peer.mediation;
+	if (peer.mediated_by)
+	{
+		cfg.mediated_by = peer.mediated_by;
+		if (peer.peer_id)
+		{
+			cfg.peer_id = peer.peer_id->clone(peer.peer_id);
+		}
+	}
+#endif /* ME */
+	peer_cfg = peer_cfg_create(name, ike_cfg, &cfg);
 
 	while (peer.local->remove_first(peer.local,
-									(void**)&auth_cfg) == SUCCESS)
+									(void**)&auth) == SUCCESS)
 	{
-		peer_cfg->add_auth_cfg(peer_cfg, auth_cfg, TRUE);
+		peer_cfg->add_auth_cfg(peer_cfg, auth->cfg, TRUE);
+		auth->cfg = NULL;
+		free_auth_data(auth);
 	}
 	while (peer.remote->remove_first(peer.remote,
-									 (void**)&auth_cfg) == SUCCESS)
+									 (void**)&auth) == SUCCESS)
 	{
-		peer_cfg->add_auth_cfg(peer_cfg, auth_cfg, FALSE);
+		peer_cfg->add_auth_cfg(peer_cfg, auth->cfg, FALSE);
+		auth->cfg = NULL;
+		free_auth_data(auth);
 	}
 	while (peer.children->remove_first(peer.children,
 									   (void**)&child_cfg) == SUCCESS)
@@ -2093,19 +2657,24 @@ CALLBACK(unload_conn, vici_message_t*,
 	}
 
 	this->lock->write_lock(this->lock);
+	while (this->handling_actions)
+	{
+		this->condvar->wait(this->condvar, this->lock);
+	}
 	enumerator = this->conns->create_enumerator(this->conns);
 	while (enumerator->enumerate(enumerator, &cfg))
 	{
 		if (streq(cfg->get_name(cfg), conn_name))
 		{
 			this->conns->remove_at(this->conns, enumerator);
-			clear_start_actions(this, cfg);
+			handle_start_actions(this, cfg, TRUE);
 			cfg->destroy(cfg);
 			found = TRUE;
 			break;
 		}
 	}
 	enumerator->destroy(enumerator);
+	this->condvar->signal(this->condvar);
 	this->lock->unlock(this->lock);
 
 	if (!found)
@@ -2161,6 +2730,7 @@ METHOD(vici_config_t, destroy, void,
 {
 	manage_commands(this, FALSE);
 	this->conns->destroy_offset(this->conns, offsetof(peer_cfg_t, destroy));
+	this->condvar->destroy(this->condvar);
 	this->lock->destroy(this->lock);
 	free(this);
 }
@@ -2186,6 +2756,7 @@ vici_config_t *vici_config_create(vici_dispatcher_t *dispatcher,
 		.dispatcher = dispatcher,
 		.conns = linked_list_create(),
 		.lock = rwlock_create(RWLOCK_TYPE_DEFAULT),
+		.condvar = rwlock_condvar_create(),
 		.authority = authority,
 		.cred = cred,
 	);

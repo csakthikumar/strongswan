@@ -77,24 +77,34 @@ static peer_cfg_t* create_peer_cfg(char *name, char *host)
 {
 	ike_cfg_t *ike_cfg;
 	peer_cfg_t *peer_cfg;
-	u_int16_t local_port, remote_port = IKEV2_UDP_PORT;
+	uint16_t local_port, remote_port = IKEV2_UDP_PORT;
+	ike_cfg_create_t ike = {
+		.version = IKEV2,
+		.local = "0.0.0.0",
+		.remote = host,
+		.remote_port = IKEV2_UDP_PORT,
+		.no_certreq = TRUE,
+		.fragmentation = FRAGMENTATION_YES,
+	};
+	peer_cfg_create_t peer = {
+		.cert_policy = CERT_SEND_IF_ASKED,
+		.unique = UNIQUE_REPLACE,
+		.keyingtries = 1,
+		.rekey_time = 36000, /* 10h */
+		.jitter_time = 600, /* 10min */
+		.over_time = 600, /* 10min */
+		.dpd = 30,
+	};
 
-	local_port = charon->socket->get_port(charon->socket, FALSE);
-	if (local_port != IKEV2_UDP_PORT)
+	ike.local_port = charon->socket->get_port(charon->socket, FALSE);
+	if (ike.local_port != IKEV2_UDP_PORT)
 	{
-		remote_port = IKEV2_NATT_PORT;
+		ike.remote_port = IKEV2_NATT_PORT;
 	}
-	ike_cfg = ike_cfg_create(IKEV2, FALSE, FALSE, "0.0.0.0", local_port,
-							 host, remote_port, FRAGMENTATION_NO, 0);
+	ike_cfg = ike_cfg_create(&ike);
 	ike_cfg->add_proposal(ike_cfg, proposal_create_default(PROTO_IKE));
 	ike_cfg->add_proposal(ike_cfg, proposal_create_default_aead(PROTO_IKE));
-	peer_cfg = peer_cfg_create(name, ike_cfg,
-							   CERT_SEND_IF_ASKED, UNIQUE_REPLACE, 1, /* keyingtries */
-							   36000, 0, /* rekey 10h, reauth none */
-							   600, 600, /* jitter, over 10min */
-							   TRUE, FALSE, TRUE, /* mobike, aggressive, pull */
-							   30, 0, /* DPD delay, timeout */
-							   FALSE, NULL, NULL); /* mediation */
+	peer_cfg = peer_cfg_create(name, ike_cfg, &peer);
 	peer_cfg->add_virtual_ip(peer_cfg, host_create_from_string("0.0.0.0", 0));
 
 	return peer_cfg;
@@ -125,18 +135,18 @@ static child_cfg_t* create_child_cfg(char *name)
 {
 	child_cfg_t *child_cfg;
 	traffic_selector_t *ts;
-	lifetime_cfg_t lifetime = {
-		.time = {
-			.life = 10800 /* 3h */,
-			.rekey = 10200 /* 2h50min */,
-			.jitter = 300 /* 5min */
-		}
+	child_cfg_create_t child = {
+		.lifetime = {
+			.time = {
+				.life = 10800 /* 3h */,
+				.rekey = 10200 /* 2h50min */,
+				.jitter = 300 /* 5min */
+			},
+		},
+		.mode = MODE_TUNNEL,
 	};
 
-	child_cfg = child_cfg_create(name, &lifetime,
-								 NULL, FALSE, MODE_TUNNEL, /* updown, hostaccess */
-								 ACTION_NONE, ACTION_NONE, ACTION_NONE, FALSE,
-								 0, 0, NULL, NULL, 0);
+	child_cfg = child_cfg_create(name, &child);
 	child_cfg->add_proposal(child_cfg, proposal_create_from_string(PROTO_ESP,
 										"aes128gcm8-aes128gcm12-aes128gcm16-"
 										"aes256gcm8-aes256gcm12-aes256gcm16"));
@@ -154,7 +164,7 @@ static child_cfg_t* create_child_cfg(char *name)
 /**
  * Controller initiate callback
  */
-static bool initiate_cb(u_int32_t *sa, debug_t group, level_t level,
+static bool initiate_cb(uint32_t *sa, debug_t group, level_t level,
 						ike_sa_t *ike_sa, const char *message)
 {
 	if (ike_sa)
@@ -177,7 +187,7 @@ void start_connection(private_xpc_dispatch_t *this,
 	bool success = FALSE;
 	xpc_endpoint_t endpoint;
 	xpc_connection_t channel;
-	u_int32_t ike_sa;
+	uint32_t ike_sa;
 
 	name = (char*)xpc_dictionary_get_string(request, "name");
 	host = (char*)xpc_dictionary_get_string(request, "host");

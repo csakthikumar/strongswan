@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2005-2006 Martin Willi
  * Copyright (C) 2005 Jan Hutter
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -49,6 +49,9 @@ enum configuration_attribute_type_t {
 	INTERNAL_IP6_LINK       = 17,
 	INTERNAL_IP6_PREFIX     = 18,
 	HOME_AGENT_ADDRESS		= 19,
+	/* RFC 7651 */
+	P_CSCF_IP4_ADDRESS		= 20,
+	P_CSCF_IP6_ADDRESS		= 21,
 	/* XAUTH attributes */
 	XAUTH_TYPE              = 16520,
 	XAUTH_USER_NAME         = 16521,

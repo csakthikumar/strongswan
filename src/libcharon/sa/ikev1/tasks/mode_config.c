@@ -58,7 +58,7 @@ struct private_mode_config_t {
 	/**
 	 * Identifier to include in response
 	 */
-	u_int16_t identifier;
+	uint16_t identifier;
 };
 
 /**
@@ -76,35 +76,20 @@ typedef struct {
  */
 static configuration_attribute_t *build_vip(host_t *vip)
 {
-	configuration_attribute_type_t type;
-	chunk_t chunk, prefix;
+	configuration_attribute_type_t type = INTERNAL_IP4_ADDRESS;
+	chunk_t chunk;
 
-	if (vip->get_family(vip) == AF_INET)
+	if (vip->get_family(vip) == AF_INET6)
 	{
-		type = INTERNAL_IP4_ADDRESS;
-		if (vip->is_anyaddr(vip))
-		{
-			chunk = chunk_empty;
-		}
-		else
-		{
-			chunk = vip->get_address(vip);
-		}
+		type = INTERNAL_IP6_ADDRESS;
+	}
+	if (vip->is_anyaddr(vip))
+	{
+		chunk = chunk_empty;
 	}
 	else
 	{
-		type = INTERNAL_IP6_ADDRESS;
-		if (vip->is_anyaddr(vip))
-		{
-			chunk = chunk_empty;
-		}
-		else
-		{
-			prefix = chunk_alloca(1);
-			*prefix.ptr = 64;
-			chunk = vip->get_address(vip);
-			chunk = chunk_cata("cc", chunk, prefix);
-		}
+		chunk = vip->get_address(vip);
 	}
 	return configuration_attribute_create_chunk(PLV1_CONFIGURATION_ATTRIBUTE,
 												type, chunk);
@@ -165,8 +150,8 @@ static void process_attribute(private_mode_config_t *this,
 			}
 			else
 			{
-				/* skip prefix byte in IPv6 payload*/
-				if (family == AF_INET6)
+				/* skip prefix byte in IPv6 payload sent by older releases */
+				if (family == AF_INET6 && addr.len == 17)
 				{
 					addr.len--;
 				}
@@ -562,7 +547,7 @@ static status_t build_reply(private_mode_config_t *this, message_t *message)
 												 type, value));
 	}
 	enumerator->destroy(enumerator);
-	/* if a client did not re-request all adresses, release them */
+	/* if a client did not re-request all addresses, release them */
 	enumerator = migrated->create_enumerator(migrated);
 	while (enumerator->enumerate(enumerator, &found))
 	{
@@ -598,7 +583,6 @@ static status_t build_ack(private_mode_config_t *this, message_t *message)
 	enumerator = this->vips->create_enumerator(this->vips);
 	while (enumerator->enumerate(enumerator, &host))
 	{
-		type = INTERNAL_IP6_ADDRESS;
 		if (host->get_family(host) == AF_INET6)
 		{
 			type = INTERNAL_IP6_ADDRESS;

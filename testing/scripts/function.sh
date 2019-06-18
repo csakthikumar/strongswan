@@ -17,6 +17,7 @@
 export TERM=xterm
 RED=$(tput setaf 1)
 GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
 NORMAL=$(tput op)
 
 # exit with given error message
@@ -49,7 +50,7 @@ execute()
 # $1 - command to execute
 execute_chroot()
 {
-	execute "chroot $LOOPDIR $@"
+	execute "chroot $LOOPDIR env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin $@"
 }
 
 # write green status message to console
@@ -64,6 +65,13 @@ echo_ok()
 echo_failed()
 {
 	echo -e "${RED}$1${NORMAL}"
+}
+
+# write yellow status message to console
+# $1 - msg
+echo_warn()
+{
+	echo -e "${YELLOW}$1${NORMAL}"
 }
 
 # log an action

@@ -8,7 +8,6 @@ EXTRA_PROGRAMS = checksum_builder
 checksum_builder_SOURCES = checksum_builder.c
 checksum_builder_LDADD = \
 	$(top_builddir)/src/libstrongswan/libstrongswan.la \
-	$(top_builddir)/src/libhydra/libhydra.la \
 	$(top_builddir)/src/libcharon/libcharon.la \
 	$(DLLIB)
 checksum_builder_LDFLAGS = -rpath '$(DESTDIR)$(ipseclibdir)'
@@ -17,7 +16,6 @@ CLEANFILES = checksum.c $(EXTRA_PROGRAMS)
 
 AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/libstrongswan \
-	-I$(top_srcdir)/src/libhydra \
 	-I$(top_srcdir)/src/libcharon \
 	-DPLUGINDIR=\"${DESTDIR}${plugindir}\"
 
@@ -35,14 +33,6 @@ if !MONOLITHIC
   AM_CPPFLAGS += -DS_PLUGINS=\""${s_plugins}\""
 endif
 
-if USE_LIBHYDRA
-  deps += $(top_builddir)/src/libhydra/libhydra.la
-  libs += $(DESTDIR)$(ipseclibdir)/libhydra.so
-if !MONOLITHIC
-  AM_CPPFLAGS += -DH_PLUGINS=\""${h_plugins}\""
-endif
-endif
-
 if USE_LIBIPSEC
   deps += $(top_builddir)/src/libipsec/libipsec.la
   libs += $(DESTDIR)$(ipseclibdir)/libipsec.so
@@ -58,9 +48,23 @@ if USE_RADIUS
   libs += $(DESTDIR)$(ipseclibdir)/libradius.so
 endif
 
+if USE_LIBNTTFFT
+  deps += $(top_builddir)/src/libstrongswan/math/libnttfft/libnttfft.la
+  libs += $(DESTDIR)$(ipseclibdir)/libnttfft.so
+endif
+
 if USE_LIBPTTLS
   deps += $(top_builddir)/src/libpttls/libpttls.la
   libs += $(DESTDIR)$(ipseclibdir)/libpttls.so
+endif
+
+if USE_LIBTPMTSS
+  deps += $(top_builddir)/src/libtpmtss/libtpmtss.la
+  libs += $(DESTDIR)$(ipseclibdir)/libtpmtss.so
+if !MONOLITHIC
+  AM_CPPFLAGS += -DP_PLUGINS=\""${p_plugins}\""
+endif
+
 endif
 
 if USE_LIBTNCCS
@@ -94,6 +98,10 @@ if USE_CMD
   exes += $(DESTDIR)$(sbindir)/charon-cmd
 endif
 
+if USE_SYSTEMD
+  exes += $(DESTDIR)$(sbindir)/charon-systemd
+endif
+
 if USE_SCEPCLIENT
   exes += $(DESTDIR)$(ipsecdir)/scepclient
 endif
@@ -112,6 +120,18 @@ endif
 
 if USE_IMV_ATTESTATION
   exes += $(DESTDIR)$(ipsecdir)/attest
+endif
+
+if USE_LIBPTTLS
+  exes += $(DESTDIR)$(bindir)/pt-tls-client
+endif
+
+if USE_IMC_SWIMA
+  exes += $(DESTDIR)$(sbindir)/sw-collector
+endif
+
+if USE_IMV_SWIMA
+  exes += $(DESTDIR)$(sbindir)/sec-updater
 endif
 
 checksum.c : checksum_builder $(deps) $(exes)

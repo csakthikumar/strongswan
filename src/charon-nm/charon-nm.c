@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2012 Tobias Brunner
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -20,7 +20,6 @@
 #include <unistd.h>
 #include <errno.h>
 
-#include <hydra.h>
 #include <daemon.h>
 
 #include <library.h>
@@ -110,6 +109,7 @@ static void run()
 	}
 }
 
+#ifndef DISABLE_SIGNAL_HANDLER
 /**
  * Handle SIGSEGV/SIGILL signals raised by threads
  */
@@ -125,6 +125,7 @@ static void segv_handler(int signal)
 	DBG1(DBG_DMN, "killing ourself, received critical signal");
 	abort();
 }
+#endif /* DISABLE_SIGNAL_HANDLER */
 
 /**
  * Lookup UID and GID
@@ -177,14 +178,6 @@ int main(int argc, char *argv[])
 		exit(SS_RC_DAEMON_INTEGRITY);
 	}
 
-	if (!libhydra_init())
-	{
-		dbg_syslog(DBG_DMN, 1, "initialization failed - aborting charon-nm");
-		libhydra_deinit();
-		library_deinit();
-		exit(SS_RC_INITIALIZATION_FAILED);
-	}
-
 	if (!libcharon_init())
 	{
 		dbg_syslog(DBG_DMN, 1, "initialization failed - aborting charon-nm");
@@ -201,18 +194,17 @@ int main(int argc, char *argv[])
 	lib->settings->set_int(lib->settings, "charon-nm.syslog.daemon.default",
 		lib->settings->get_int(lib->settings,
 							   "charon-nm.syslog.daemon.default", 1));
-	charon->load_loggers(charon, NULL, FALSE);
+	charon->load_loggers(charon);
 
 	/* use random ports to avoid conflicts with regular charon */
 	lib->settings->set_int(lib->settings, "charon-nm.port", 0);
-	lib->settings->set_int(lib->settings, "charon-nm.port_natt_t", 0);
+	lib->settings->set_int(lib->settings, "charon-nm.port_nat_t", 0);
 
 	DBG1(DBG_DMN, "Starting charon NetworkManager backend (strongSwan "VERSION")");
 	if (lib->integrity)
 	{
 		DBG1(DBG_DMN, "integrity tests enabled:");
 		DBG1(DBG_DMN, "lib    'libstrongswan': passed file and segment integrity tests");
-		DBG1(DBG_DMN, "lib    'libhydra': passed file and segment integrity tests");
 		DBG1(DBG_DMN, "lib    'libcharon': passed file and segment integrity tests");
 		DBG1(DBG_DMN, "daemon 'charon-nm': passed file integrity test");
 	}
@@ -235,16 +227,21 @@ int main(int argc, char *argv[])
 		goto deinit;
 	}
 
-	/* add handler for SEGV and ILL,
+	/* add handler for fatal signals,
 	 * INT and TERM are handled by sigwaitinfo() in run() */
-	action.sa_handler = segv_handler;
 	action.sa_flags = 0;
 	sigemptyset(&action.sa_mask);
 	sigaddset(&action.sa_mask, SIGINT);
 	sigaddset(&action.sa_mask, SIGTERM);
+
+	/* optionally let the external system handle fatal signals */
+#ifndef DISABLE_SIGNAL_HANDLER
+	action.sa_handler = segv_handler;
 	sigaction(SIGSEGV, &action, NULL);
 	sigaction(SIGILL, &action, NULL);
 	sigaction(SIGBUS, &action, NULL);
+#endif /* DISABLE_SIGNAL_HANDLER */
+
 	action.sa_handler = SIG_IGN;
 	sigaction(SIGPIPE, &action, NULL);
 
@@ -260,7 +257,6 @@ int main(int argc, char *argv[])
 
 deinit:
 	libcharon_deinit();
-	libhydra_deinit();
 	library_deinit();
 	return status;
 }

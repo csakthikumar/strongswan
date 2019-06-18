@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2014 Tobias Brunner
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -15,20 +15,20 @@
 
 package org.strongswan.android.ui;
 
-import org.strongswan.android.R;
-
-import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Dialog;
-import android.app.DialogFragment;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.os.Bundle;
+import android.support.v7.app.AlertDialog;
+import android.support.v7.app.AppCompatDialogFragment;
+
+import org.strongswan.android.R;
 
 /**
  * Class that displays a confirmation dialog to delete a selected local
  * certificate.
  */
-public class CertificateDeleteConfirmationDialog extends DialogFragment
+public class CertificateDeleteConfirmationDialog extends AppCompatDialogFragment
 {
 	public static final String ALIAS = "alias";
 	OnCertificateDeleteListener mListener;
@@ -43,12 +43,12 @@ public class CertificateDeleteConfirmationDialog extends DialogFragment
 	}
 
 	@Override
-	public void onAttach(Activity activity)
+	public void onAttach(Context context)
 	{
-		super.onAttach(activity);
-		if (activity instanceof OnCertificateDeleteListener)
+		super.onAttach(context);
+		if (context instanceof OnCertificateDeleteListener)
 		{
-			mListener = (OnCertificateDeleteListener)activity;
+			mListener = (OnCertificateDeleteListener)context;
 		}
 	}
 

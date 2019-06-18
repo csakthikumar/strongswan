@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2010 Tobias Brunner
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -15,7 +15,6 @@
 
 #include "kernel_handler.h"
 
-#include <hydra.h>
 #include <daemon.h>
 #include <processing/jobs/acquire_job.h>
 #include <processing/jobs/delete_child_sa_job.h>
@@ -40,7 +39,7 @@ struct private_kernel_handler_t {
 /**
  * convert an IP protocol identifier to the IKEv2 specific protocol identifier.
  */
-static inline protocol_id_t proto_ip2ike(u_int8_t protocol)
+static inline protocol_id_t proto_ip2ike(uint8_t protocol)
 {
 	switch (protocol)
 	{
@@ -54,7 +53,7 @@ static inline protocol_id_t proto_ip2ike(u_int8_t protocol)
 }
 
 METHOD(kernel_listener_t, acquire, bool,
-	private_kernel_handler_t *this, u_int32_t reqid,
+	private_kernel_handler_t *this, uint32_t reqid,
 	traffic_selector_t *src_ts, traffic_selector_t *dst_ts)
 {
 	if (src_ts && dst_ts)
@@ -72,7 +71,7 @@ METHOD(kernel_listener_t, acquire, bool,
 }
 
 METHOD(kernel_listener_t, expire, bool,
-	private_kernel_handler_t *this, u_int8_t protocol, u_int32_t spi,
+	private_kernel_handler_t *this, uint8_t protocol, uint32_t spi,
 	host_t *dst, bool hard)
 {
 	protocol_id_t proto = proto_ip2ike(protocol);
@@ -94,7 +93,7 @@ METHOD(kernel_listener_t, expire, bool,
 }
 
 METHOD(kernel_listener_t, mapping, bool,
-	private_kernel_handler_t *this, u_int8_t protocol, u_int32_t spi,
+	private_kernel_handler_t *this, uint8_t protocol, uint32_t spi,
 	host_t *dst, host_t *remote)
 {
 	protocol_id_t proto = proto_ip2ike(protocol);
@@ -109,7 +108,7 @@ METHOD(kernel_listener_t, mapping, bool,
 }
 
 METHOD(kernel_listener_t, migrate, bool,
-	private_kernel_handler_t *this, u_int32_t reqid,
+	private_kernel_handler_t *this, uint32_t reqid,
 	traffic_selector_t *src_ts, traffic_selector_t *dst_ts,
 	policy_dir_t direction, host_t *local, host_t *remote)
 {
@@ -135,8 +134,7 @@ METHOD(kernel_listener_t, roam, bool,
 METHOD(kernel_handler_t, destroy, void,
 	private_kernel_handler_t *this)
 {
-	hydra->kernel_interface->remove_listener(hydra->kernel_interface,
-											 &this->public.listener);
+	charon->kernel->remove_listener(charon->kernel, &this->public.listener);
 	free(this);
 }
 
@@ -157,8 +155,7 @@ kernel_handler_t *kernel_handler_create()
 		},
 	);
 
-	hydra->kernel_interface->add_listener(hydra->kernel_interface,
-										  &this->public.listener);
+	charon->kernel->add_listener(charon->kernel, &this->public.listener);
 
 	return &this->public;
 }

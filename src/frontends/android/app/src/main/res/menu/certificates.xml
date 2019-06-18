@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Copyright (C) 2014 Tobias Brunner
-    Hochschule fuer Technik Rapperswil
+    HSR Hochschule fuer Technik Rapperswil
 
     This program is free software; you can redistribute it and/or modify it
     under the terms of the GNU General Public License as published by the
@@ -13,16 +13,17 @@
     or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
     for more details.
 -->
-<menu xmlns:android="http://schemas.android.com/apk/res/android" >
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+      xmlns:app="http://schemas.android.com/apk/res-auto">
 
     <item
         android:id="@+id/menu_import_certificate"
         android:title="@string/import_certificate"
-        android:showAsAction="withText" />
+        app:showAsAction="withText" />
 
     <item
         android:id="@+id/menu_reload_certs"
         android:title="@string/reload_trusted_certs"
-        android:showAsAction="withText" />
+        app:showAsAction="withText" />
 
 </menu>

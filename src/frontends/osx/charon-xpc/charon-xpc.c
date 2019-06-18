@@ -22,7 +22,6 @@
 #include <errno.h>
 
 #include <library.h>
-#include <hydra.h>
 #include <daemon.h>
 #include <threading/thread.h>
 #include <utils/backtrace.h>
@@ -41,11 +40,6 @@ void dispatcher_cleanup()
 {
 	DESTROY_IF(dispatcher);
 }
-
-/**
- * Loglevel configuration
- */
-static level_t levels[DBG_MAX];
 
 /**
  * hook in library for debugging messages
@@ -155,6 +149,7 @@ int main(int argc, char *argv[])
 {
 	struct sigaction action;
 	struct utsname utsname;
+	level_t levels[DBG_MAX];
 	int group;
 
 	dbg = dbg_stderr;
@@ -170,11 +165,6 @@ int main(int argc, char *argv[])
 			exit(SS_RC_DAEMON_INTEGRITY);
 		}
 	}
-	atexit(libhydra_deinit);
-	if (!libhydra_init())
-	{
-		exit(SS_RC_INITIALIZATION_FAILED);
-	}
 	atexit(libcharon_deinit);
 	if (!libcharon_init())
 	{
@@ -184,7 +174,8 @@ int main(int argc, char *argv[])
 	{
 		levels[group] = LEVEL_CTRL;
 	}
-	charon->load_loggers(charon, levels, TRUE);
+	charon->set_default_loggers(charon, levels, TRUE);
+	charon->load_loggers(charon);
 
 	lib->settings->set_default_str(lib->settings, "charon-xpc.port", "0");
 	lib->settings->set_default_str(lib->settings, "charon-xpc.port_nat_t", "0");

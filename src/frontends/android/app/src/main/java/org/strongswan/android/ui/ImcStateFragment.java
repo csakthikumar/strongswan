@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2013 Tobias Brunner
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -15,17 +15,6 @@
 
 package org.strongswan.android.ui;
 
-import java.util.ArrayList;
-
-import org.strongswan.android.R;
-import org.strongswan.android.logic.VpnStateService;
-import org.strongswan.android.logic.VpnStateService.VpnStateListener;
-import org.strongswan.android.logic.imc.ImcState;
-import org.strongswan.android.logic.imc.RemediationInstruction;
-
-import android.app.Fragment;
-import android.app.FragmentManager;
-import android.app.FragmentTransaction;
 import android.app.Service;
 import android.content.ComponentName;
 import android.content.Context;
@@ -33,6 +22,10 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.support.v4.app.Fragment;
+import android.support.v4.app.FragmentManager;
+import android.support.v4.app.FragmentTransaction;
+import android.support.v4.content.ContextCompat;
 import android.view.GestureDetector;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -44,13 +37,25 @@ import android.view.ViewGroup;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import org.strongswan.android.R;
+import org.strongswan.android.logic.VpnStateService;
+import org.strongswan.android.logic.VpnStateService.VpnStateListener;
+import org.strongswan.android.logic.imc.ImcState;
+import org.strongswan.android.logic.imc.RemediationInstruction;
+
+import java.util.ArrayList;
+
 public class ImcStateFragment extends Fragment implements VpnStateListener
 {
+	private int mColorIsolate;
+	private int mColorBlock;
+	private boolean mVisible;
 	private TextView mStateView;
 	private TextView mAction;
 	private LinearLayout mButton;
 	private VpnStateService mService;
-	private final ServiceConnection mServiceConnection = new ServiceConnection() {
+	private final ServiceConnection mServiceConnection = new ServiceConnection()
+	{
 		@Override
 		public void onServiceDisconnected(ComponentName name)
 		{
@@ -61,8 +66,11 @@ public class ImcStateFragment extends Fragment implements VpnStateListener
 		public void onServiceConnected(ComponentName name, IBinder service)
 		{
 			mService = ((VpnStateService.LocalBinder)service).getService();
-			mService.registerListener(ImcStateFragment.this);
-			updateView();
+			if (mVisible)
+			{
+				mService.registerListener(ImcStateFragment.this);
+				updateView();
+			}
 		}
 	};
 
@@ -70,6 +78,9 @@ public class ImcStateFragment extends Fragment implements VpnStateListener
 	public void onCreate(Bundle savedInstanceState)
 	{
 		super.onCreate(savedInstanceState);
+
+		mColorIsolate = ContextCompat.getColor(getActivity(), R.color.warning_text);
+		mColorBlock = ContextCompat.getColor(getActivity(), R.color.error_text);
 
 		/* bind to the service only seems to work from the ApplicationContext */
 		Context context = getActivity().getApplicationContext();
@@ -86,7 +97,8 @@ public class ImcStateFragment extends Fragment implements VpnStateListener
 		View view = inflater.inflate(R.layout.imc_state_fragment, container, false);
 
 		mButton = (LinearLayout)view.findViewById(R.id.imc_state_button);
-		mButton.setOnClickListener(new OnClickListener() {
+		mButton.setOnClickListener(new OnClickListener()
+		{
 			@Override
 			public void onClick(View v)
 			{
@@ -104,7 +116,8 @@ public class ImcStateFragment extends Fragment implements VpnStateListener
 				startActivity(intent);
 			}
 		});
-		final GestureDetector gestures = new GestureDetector(getActivity(), new GestureDetector.SimpleOnGestureListener() {
+		final GestureDetector gestures = new GestureDetector(getActivity(), new GestureDetector.SimpleOnGestureListener()
+		{
 			/* a better value would be getScaledTouchExplorationTapSlop() but that is hidden */
 			private final int mMinDistance = ViewConfiguration.get(getActivity()).getScaledTouchSlop() * 4;
 
@@ -122,7 +135,8 @@ public class ImcStateFragment extends Fragment implements VpnStateListener
 				return false;
 			}
 		});
-		mButton.setOnTouchListener(new OnTouchListener() {
+		mButton.setOnTouchListener(new OnTouchListener()
+		{
 			@Override
 			public boolean onTouch(View v, MotionEvent event)
 			{
@@ -137,9 +151,10 @@ public class ImcStateFragment extends Fragment implements VpnStateListener
 	}
 
 	@Override
-	public void onStart()
+	public void onResume()
 	{
-		super.onStart();
+		super.onResume();
+		mVisible = true;
 		if (mService != null)
 		{
 			mService.registerListener(this);
@@ -148,9 +163,10 @@ public class ImcStateFragment extends Fragment implements VpnStateListener
 	}
 
 	@Override
-	public void onStop()
+	public void onPause()
 	{
-		super.onStop();
+		super.onPause();
+		mVisible = false;
 		if (mService != null)
 		{
 			mService.unregisterListener(this);
@@ -190,12 +206,12 @@ public class ImcStateFragment extends Fragment implements VpnStateListener
 				break;
 			case ISOLATE:
 				mStateView.setText(R.string.imc_state_isolate);
-				mStateView.setTextColor(getResources().getColor(R.color.warning_text));
+				mStateView.setTextColor(mColorIsolate);
 				ft.show(this);
 				break;
 			case BLOCK:
 				mStateView.setText(R.string.imc_state_block);
-				mStateView.setTextColor(getResources().getColor(R.color.error_text));
+				mStateView.setTextColor(mColorBlock);
 				ft.show(this);
 				break;
 		}

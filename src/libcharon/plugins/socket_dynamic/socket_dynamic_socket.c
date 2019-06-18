@@ -3,7 +3,7 @@
  * Copyright (C) 2006 Daniel Roethlisberger
  * Copyright (C) 2005-2010 Martin Willi
  * Copyright (C) 2005 Jan Hutter
- * Hochschule fuer Technik Rapperswil
+ * HSR Hochschule fuer Technik Rapperswil
  * Copyright (C) 2010 revosec AG
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -36,7 +36,6 @@
 #include <netinet/udp.h>
 #include <net/if.h>
 
-#include <hydra.h>
 #include <daemon.h>
 #include <threading/thread.h>
 #include <threading/rwlock.h>
@@ -108,7 +107,7 @@ struct dynsock_t {
 	/**
 	 * Bound source port
 	 */
-	u_int16_t port;
+	uint16_t port;
 };
 
 /**
@@ -325,7 +324,7 @@ METHOD(socket_t, receiver, status_t,
 /**
  * Get the port allocated dynamically using bind()
  */
-static bool get_dynamic_port(int fd, int family, u_int16_t *port)
+static bool get_dynamic_port(int fd, int family, uint16_t *port)
 {
 	union {
 		struct sockaddr_storage ss;
@@ -368,7 +367,7 @@ static bool get_dynamic_port(int fd, int family, u_int16_t *port)
  * open a socket to send and receive packets
  */
 static int open_socket(private_socket_dynamic_socket_t *this,
-					   int family, u_int16_t *port)
+					   int family, uint16_t *port)
 {
 	union {
 		struct sockaddr_storage ss;
@@ -438,15 +437,13 @@ static int open_socket(private_socket_dynamic_socket_t *this,
 		return 0;
 	}
 
-	if (!hydra->kernel_interface->bypass_socket(hydra->kernel_interface,
-												fd, family))
+	if (!charon->kernel->bypass_socket(charon->kernel, fd, family))
 	{
 		DBG1(DBG_NET, "installing IKE bypass policy failed");
 	}
 
 	/* enable UDP decapsulation on each socket */
-	if (!hydra->kernel_interface->enable_udp_decap(hydra->kernel_interface,
-												   fd, family, *port))
+	if (!charon->kernel->enable_udp_decap(charon->kernel, fd, family, *port))
 	{
 		DBG1(DBG_NET, "enabling UDP decapsulation for %s on port %d failed",
 			 family == AF_INET ? "IPv4" : "IPv6", *port);
@@ -484,7 +481,7 @@ static dynsock_t *get_any_socket(private_socket_dynamic_socket_t *this,
  * Find/Create a socket to send from host
  */
 static dynsock_t *find_socket(private_socket_dynamic_socket_t *this,
-							  int family, u_int16_t port)
+							  int family, uint16_t port)
 {
 	dynsock_t *skt, lookup = {
 		.family = family,
@@ -639,7 +636,7 @@ METHOD(socket_t, sender, status_t,
 	return SUCCESS;
 }
 
-METHOD(socket_t, get_port, u_int16_t,
+METHOD(socket_t, get_port, uint16_t,
 	private_socket_dynamic_socket_t *this, bool nat_t)
 {
 	/* we return 0 here for users that have no explicit port configured, the
